@@ -3,15 +3,20 @@ import yfinance as yf
 import pandas as pd
 import requests
 import plotly.graph_objects as go
-import urllib.parse
 from datetime import datetime, timedelta
+
+# ==========================================
+# 🔑 在此設定你的 FinMind VIP Token
+# ==========================================
+# 請將下方引號內的文字替換為你專屬的 Token
+FINMIND_TOKEN =eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8
 
 # 設定網頁標題與圖示
 st.set_page_config(page_title="台股處置預警雷達", layout="wide")
 
 @st.cache_data(ttl=86400)
 def get_stock_dict():
-    """透過開源 API 獲取全市場代碼與名稱 (可突破政府海外 IP 封鎖)"""
+    """全市場代碼與名稱 (FinMind TaiwanStockInfo)"""
     mapping = {}
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
@@ -25,22 +30,8 @@ def get_stock_dict():
                 if len(code) == 4 and code.isdigit():
                     suffix = ".TW" if market == 'twse' else ".TWO"
                     mapping[f"{code} {name}"] = f"{code}{suffix}"
-            if mapping: return mapping 
-    except: pass
-
-    # 備用方案：證交所官方 API
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        res_tse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=5)
-        if res_tse.status_code == 200:
-            for item in res_tse.json():
-                if len(item['Code']) == 4 and item['Code'].isdigit(): mapping[f"{item['Code']} {item['Name']}"] = f"{item['Code']}.TW"
-        
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=5)
-        if res_otc.status_code == 200:
-            for item in res_otc.json():
-                if len(item['SecuritiesCompanyCode']) == 4 and item['SecuritiesCompanyCode'].isdigit(): mapping[f"{item['SecuritiesCompanyCode']} {item['CompanyName']}"] = f"{item['SecuritiesCompanyCode']}.TWO"
-    except: pass 
+    except Exception as e:
+        st.error("無法連線至 FinMind 獲取股票清單。")
     return mapping
 
 def extract_match_time(text):
@@ -49,93 +40,53 @@ def extract_match_time(text):
     elif "十分" in text or "10分" in text: return "⚠️ 10分鐘撮合"
     else: return "🔍 特殊人工撮合"
 
-def fetch_with_proxy(url):
-    """🛡️ 防彈機制：多重代理伺服器繞道抓取"""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=3)
-        if r.status_code == 200: return r.json()
-    except: pass
-    
-    proxies = [
-        f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}",
-        f"https://corsproxy.io/?{urllib.parse.quote(url)}"
-    ]
-    for proxy in proxies:
-        try:
-            r = requests.get(proxy, headers=headers, timeout=5)
-            if r.status_code == 200: return r.json()
-        except: pass
-    return None
-
 @st.cache_data(ttl=600)
-def get_official_disposal_list(token=""):
+def get_finmind_disposal_list(token):
+    """使用 FinMind VIP 權限抓取官方處置名單"""
     disposal_dict = {}
-    tse_success = False 
-    otc_success = False
+    api_success = False 
     
-    # ==========================================
-    # 路線 A：有 FinMind Token，走 VIP 穩定通道
-    # ==========================================
-    if token:
-        try:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-            url = "https://api.finmindtrade.com/api/v4/data"
-            params = {
-                "dataset": "TaiwanStockDispositionSecuritiesPeriod",
-                "start_date": start_str,
-                "end_date": today_str,
-                "token": token
-            }
-            res = requests.get(url, params=params, timeout=5)
-            data = res.json()
-            
-            if data.get("msg") == "success":
-                df = pd.DataFrame(data["data"])
-                if not df.empty:
-                    df['period_end_dt'] = pd.to_datetime(df['period_end'])
-                    # 只過濾出今天仍在處置期間內的股票
-                    active_df = df[df['period_end_dt'] >= pd.Timestamp.today().normalize()]
-                    
-                    for _, row in active_df.iterrows():
-                        code = str(row['stock_id'])
-                        measure_text = str(row['measure'])
-                        period = f"{row['period_start']} ~ {row['period_end']}"
-                        disposal_dict[code] = {
-                            'period': period,
-                            'measure': measure_text,
-                            'match_time': extract_match_time(measure_text)
-                        }
-                return disposal_dict, True, True
-            else:
-                st.sidebar.error(f"FinMind API 錯誤: {data.get('msg')}")
-        except Exception as e:
-            st.sidebar.error("FinMind 連線失敗，自動切換至備用路由...")
+    if not token or token == "YOUR_FINMIND_TOKEN_HERE":
+        return disposal_dict, False
 
-    # ==========================================
-    # 路線 B：無 Token，走免費 Proxy 繞道機制
-    # ==========================================
-    tse_data = fetch_with_proxy("https://www.twse.com.tw/announcement/punish?response=json")
-    if tse_data and 'data' in tse_data:
-        tse_success = True
-        for item in tse_data['data']:
-            if len(item) >= 9:
-                code = item[2]
-                measure_text = f"{item[7]}：\n{item[8]}"
-                disposal_dict[code] = {'period': item[6], 'measure': measure_text, 'match_time': extract_match_time(measure_text)}
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        # 往回抓 30 天，確保涵蓋目前所有正在處置中的股票
+        start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "TaiwanStockDispositionSecuritiesPeriod",
+            "start_date": start_str,
+            "end_date": today_str,
+            "token": token
+        }
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
+        
+        if data.get("msg") == "success":
+            api_success = True
+            df = pd.DataFrame(data["data"])
+            if not df.empty:
+                df['period_end_dt'] = pd.to_datetime(df['period_end'])
+                # 嚴格過濾：只留下「今天」仍處於處置期間內的股票
+                active_df = df[df['period_end_dt'] >= pd.Timestamp.today().normalize()]
                 
-    otc_data = fetch_with_proxy("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information")
-    if otc_data is not None and isinstance(otc_data, list):
-        otc_success = True
-        for item in otc_data:
-            code = item.get('SecuritiesCompanyCode', '')
-            if code:
-                measure_text = item.get('PunishmentMeasure', '')
-                if item.get('PunishmentContent'): measure_text += f"：\n{item.get('PunishmentContent')}"
-                disposal_dict[code] = {'period': item.get('PunishmentPeriod', '未知期間'), 'measure': measure_text, 'match_time': extract_match_time(measure_text)}
+                for _, row in active_df.iterrows():
+                    code = str(row['stock_id'])
+                    measure_text = str(row['measure'])
+                    period = f"{row['period_start']} ~ {row['period_end']}"
+                    disposal_dict[code] = {
+                        'period': period,
+                        'measure': measure_text,
+                        'match_time': extract_match_time(measure_text)
+                    }
+        else:
+            st.sidebar.error(f"FinMind API 錯誤: {data.get('msg')}")
+    except Exception as e:
+        st.sidebar.error("FinMind 連線失敗，請檢查網路狀態。")
                 
-    return disposal_dict, tse_success, otc_success
+    return disposal_dict, api_success
 
 # 核心計算邏輯
 def check_attention(prices_list):
@@ -155,18 +106,16 @@ def simulate_future(prices, current_streak, direction='up'):
     return None, None
 
 # --- UI 介面 ---
-st.title("🎯 台股處置風險預警雷達")
-st.markdown("提供歷史違規溯源與未來情境推演。(核心價格計算完全不受雲端封鎖影響)")
+st.title("🎯 台股處置風險預警雷達 (FinMind PRO 版)")
+st.markdown("已串接 FinMind 專業資料庫，提供最穩定之歷史溯源與未來情境推演。")
 
 mode = st.sidebar.selectbox("選擇模式", ["個股深度診斷", "全市場掃描 (建置中)"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔑 進階 API 設定")
-finmind_token = st.sidebar.text_input("FinMind VIP Token (無則留空)", type="password")
-st.sidebar.caption("提示：處置股名單屬 FinMind 付費權限。若留空將自動使用免費 Proxy 繞道抓取。")
+st.sidebar.success("🟢 FinMind 專屬通道已啟用")
 
 stock_dict = get_stock_dict()
-official_disposal, tse_success, otc_success = get_official_disposal_list(finmind_token)
+official_disposal, api_success = get_finmind_disposal_list(FINMIND_TOKEN)
 
 if mode == "個股深度診斷":
     col1, col2 = st.columns([1, 2])
@@ -190,7 +139,7 @@ if mode == "個股深度診斷":
             ticker = stock_dict[search]
             pure_code = ticker.split('.')[0] 
             
-        with st.spinner('正在從全球資料庫載入最新價量資料與運算...'):
+        with st.spinner('正在載入最新價量資料與運算...'):
             df = pd.DataFrame()
             try:
                 if not ticker:
@@ -205,7 +154,6 @@ if mode == "個股深度診斷":
             except: pass
             
         is_twse = ticker.endswith('.TW') if ticker else True
-        api_success = tse_success if is_twse else otc_success
             
         is_disposal_now = pure_code in official_disposal
         
@@ -216,7 +164,7 @@ if mode == "個股深度診斷":
             with st.expander("📝 點此展開查看官方完整處置內容與規定"):
                 st.markdown(status_info['measure'])
         elif not api_success:
-            st.info("☁️ **雲端運行模式限制**\n\n受限於證交所海外 IP 封鎖，目前無法即時連線官方處置名單。請直接依賴右側雷達預測，或點擊下方按鈕查詢官方歷史。")
+            st.error("❌ FinMind Token 驗證失敗或無效。請確認程式碼最上方的 FINMIND_TOKEN 設定是否正確。")
         else:
             st.success("✅ 官方狀態：目前為正常交易 (非處置股)")
             
