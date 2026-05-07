@@ -27,7 +27,7 @@ def get_stock_dict():
             if mapping: return mapping 
     except: pass
 
-    # 備用方案：證交所官方 API
+    # 備用方案
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res_tse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=5)
@@ -49,33 +49,34 @@ def extract_match_time(text):
     else: return "🔍 特殊人工撮合"
 
 def fetch_with_proxy(url):
-    """🛡️ 防彈機制：如果被封鎖，自動切換代理伺服器繞道抓取"""
+    """🛡️ 防彈機制：多重代理伺服器繞道抓取"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
-    # 1. 嘗試直接連線
     try:
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200: return r.json()
     except: pass
     
-    # 2. 若被擋，透過 allorigins 代理伺服器繞道
-    try:
-        encoded_url = urllib.parse.quote(url)
-        proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
-        r = requests.get(proxy_url, headers=headers, timeout=5)
-        if r.status_code == 200: return r.json()
-    except: pass
+    proxies = [
+        f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}",
+        f"https://corsproxy.io/?{urllib.parse.quote(url)}"
+    ]
+    for proxy in proxies:
+        try:
+            r = requests.get(proxy, headers=headers, timeout=5)
+            if r.status_code == 200: return r.json()
+        except: pass
     return None
 
 @st.cache_data(ttl=600)
 def get_official_disposal_list():
-    """抓取官方處置名單 (具備 Proxy 突破能力)"""
     disposal_dict = {}
-    api_success = False 
+    tse_success = False 
+    otc_success = False
     
     # 抓取上市
     tse_data = fetch_with_proxy("https://www.twse.com.tw/announcement/punish?response=json")
     if tse_data and 'data' in tse_data:
-        api_success = True
+        tse_success = True
         for item in tse_data['data']:
             if len(item) >= 9:
                 code = item[2]
@@ -84,8 +85,8 @@ def get_official_disposal_list():
                 
     # 抓取上櫃
     otc_data = fetch_with_proxy("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information")
-    if otc_data and isinstance(otc_data, list):
-        api_success = True
+    if otc_data is not None and isinstance(otc_data, list):
+        otc_success = True
         for item in otc_data:
             code = item.get('SecuritiesCompanyCode', '')
             if code:
@@ -93,7 +94,7 @@ def get_official_disposal_list():
                 if item.get('PunishmentContent'): measure_text += f"：\n{item.get('PunishmentContent')}"
                 disposal_dict[code] = {'period': item.get('PunishmentPeriod', '未知期間'), 'measure': measure_text, 'match_time': extract_match_time(measure_text)}
                 
-    return disposal_dict, api_success
+    return disposal_dict, tse_success, otc_success
 
 # 核心計算邏輯
 def check_attention(prices_list):
@@ -118,7 +119,7 @@ st.markdown("提供歷史違規溯源與未來情境推演。(核心價格計算
 
 mode = st.sidebar.selectbox("選擇模式", ["個股深度診斷", "全市場掃描 (建置中)"])
 stock_dict = get_stock_dict()
-official_disposal, api_success = get_official_disposal_list()
+official_disposal, tse_success, otc_success = get_official_disposal_list()
 
 if mode == "個股深度診斷":
     col1, col2 = st.columns([1, 2])
@@ -142,30 +143,8 @@ if mode == "個股深度診斷":
             ticker = stock_dict[search]
             pure_code = ticker.split('.')[0] 
             
-        is_disposal_now = pure_code in official_disposal
-        
-        if is_disposal_now:
-            status_info = official_disposal[pure_code]
-            st.error(f"### 🚨 本股目前為【官方處置股】\n## {status_info['match_time']}")
-            st.info(f"**🗓️ 處置期間**：{status_info['period']}")
-            with st.expander("📝 點此展開查看官方完整處置內容與規定"):
-                st.markdown(status_info['measure'])
-        elif not api_success:
-            # 🎨 優化：如果連 Proxy 也被擋，就顯示一個低調的藍色資訊框，而不是刺眼的黃色警告
-            st.info("☁️ **雲端運行模式限制**\n\n受限於證交所海外 IP 封鎖，目前無法即時連線官方處置名單。請直接依賴右側雷達預測，或點擊下方按鈕查詢官方歷史。")
-        else:
-            st.success("✅ 官方狀態：目前為正常交易 (非處置股)")
-            
-        # 歷史公告查詢區塊 (✅ 已根據要求修改按鈕名稱)
-        st.markdown("---")
-        st.markdown("**想查詢官方處置/注意歷史公告？**")
-        hist_col1, hist_col2 = st.columns(2)
-        with hist_col1: st.link_button("📜 歷史【注意股】查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
-        with hist_col2: st.link_button("🛑 歷史【處置股】查詢", "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw")
-        
-        st.markdown("---")
-        
-        with st.spinner('正在載入最新價量資料與運算...'):
+        # 🌟 先進行 yfinance 抓取，藉此確認是上市(.TW)還是上櫃(.TWO)
+        with st.spinner('正在從全球資料庫載入最新價量資料與運算...'):
             df = pd.DataFrame()
             try:
                 if not ticker:
@@ -178,6 +157,36 @@ if mode == "個股深度診斷":
                 else:
                     df = yf.download(ticker, period="120d", progress=False)
             except: pass
+            
+        # 🟢 判斷上市或上櫃，決定要套用哪個連線狀態與按鈕網址
+        is_twse = ticker.endswith('.TW') if ticker else True
+        api_success = tse_success if is_twse else otc_success
+            
+        is_disposal_now = pure_code in official_disposal
+        
+        if is_disposal_now:
+            status_info = official_disposal[pure_code]
+            st.error(f"### 🚨 本股目前為【官方處置股】\n## {status_info['match_time']}")
+            st.info(f"**🗓️ 處置期間**：{status_info['period']}")
+            with st.expander("📝 點此展開查看官方完整處置內容與規定"):
+                st.markdown(status_info['measure'])
+        elif not api_success:
+            st.info("☁️ **雲端運行模式限制**\n\n受限於證交所海外 IP 封鎖，目前無法即時連線官方處置名單。請直接依賴右側雷達預測，或點擊下方按鈕查詢官方歷史。")
+        else:
+            st.success("✅ 官方狀態：目前為正常交易 (非處置股)")
+            
+        # 🟢 歷史公告查詢區塊 (動態切換上市與上櫃的官方網址，且已依需求改名)
+        st.markdown("---")
+        st.markdown("**想查詢官方處置/注意歷史公告？**")
+        hist_col1, hist_col2 = st.columns(2)
+        if is_twse:
+            with hist_col1: st.link_button("📜 歷史【注意股】查詢", "https://www.twse.com.tw/zh/announcement/notice.html")
+            with hist_col2: st.link_button("🛑 歷史【處置股】查詢", "https://www.twse.com.tw/zh/announcement/punish.html")
+        else:
+            with hist_col1: st.link_button("📜 歷史【注意股】查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
+            with hist_col2: st.link_button("🛑 歷史【處置股】查詢", "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw")
+        
+        st.markdown("---")
         
         if not df.empty and 'Close' in df and len(df) >= 90:
             closes = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
