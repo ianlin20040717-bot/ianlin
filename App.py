@@ -18,54 +18,16 @@ st.set_page_config(page_title="台股處置預警雷達", layout="wide")
 # ==========================================
 st.markdown("""
 <style>
-    .card-container {
-        background-color: #262730;
-        border-radius: 10px;
-        padding: 20px;
-        margin-bottom: 15px;
-        border: 1px solid #333;
-    }
-    .metric-label {
-        color: #a0a0a5;
-        font-size: 14px;
-        margin-bottom: 5px;
-    }
-    .metric-value {
-        color: #ffffff;
-        font-size: 24px;
-        font-weight: 600;
-    }
-    .metric-sub {
-        font-size: 14px;
-    }
-    .tag {
-        display: inline-block;
-        padding: 4px 10px;
-        border: 1px solid #555;
-        border-radius: 4px;
-        font-size: 12px;
-        color: #ccc;
-        margin-left: 6px;
-    }
-    .tag-yellow {
-        background-color: #f5c518;
-        color: #000;
-        border: none;
-        font-weight: bold;
-    }
+    .card-container { background-color: #262730; border-radius: 10px; padding: 20px; margin-bottom: 15px; border: 1px solid #333; }
+    .metric-label { color: #a0a0a5; font-size: 14px; margin-bottom: 5px; }
+    .metric-value { color: #ffffff; font-size: 24px; font-weight: 600; }
+    .metric-sub { font-size: 14px; }
+    .tag { display: inline-block; padding: 4px 10px; border: 1px solid #555; border-radius: 4px; font-size: 12px; color: #ccc; margin-left: 6px; }
+    .tag-yellow { background-color: #f5c518; color: #000; border: none; font-weight: bold; }
     .red-text { color: #ff4b4b; }
     .green-text { color: #00ff00; }
-    .title-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 20px;
-    }
-    .title-text {
-        font-size: 32px;
-        font-weight: bold;
-        color: #fff;
-    }
+    .title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .title-text { font-size: 32px; font-weight: bold; color: #fff; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,11 +47,7 @@ def get_stock_dict():
                 if len(code) == 4 and code.isdigit():
                     suffix = ".TW" if market == 'twse' else ".TWO"
                     market_name = "上市" if market == 'twse' else "上櫃"
-                    mapping[f"{code} {name}"] = {
-                        "ticker": f"{code}{suffix}", 
-                        "market_name": market_name,
-                        "industry": industry
-                    }
+                    mapping[f"{code} {name}"] = {"ticker": f"{code}{suffix}", "market_name": market_name, "industry": industry}
     except: pass
     return mapping
 
@@ -105,62 +63,107 @@ def extract_match_time_short(text):
     elif "十分" in text or "10分" in text: return "10分盤"
     else: return "人工盤"
 
-@st.cache_data(ttl=600)
-def get_finmind_disposal_list(token):
-    disposal_dict = {}
-    if not token or token == "YOUR_FINMIND_TOKEN_HERE": return disposal_dict, False
+def fetch_with_proxy(url):
+    """🛡️ 防彈機制：強制繞過政府雲端封鎖"""
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        url = "https://api.finmindtrade.com/api/v4/data"
-        params = {"dataset": "TaiwanStockDispositionSecuritiesPeriod", "start_date": start_str, "end_date": today_str, "token": token}
-        res = requests.get(url, params=params, timeout=10)
-        data = res.json()
-        if data.get("msg") == "success":
-            df = pd.DataFrame(data["data"])
-            if not df.empty:
-                df['period_end_dt'] = pd.to_datetime(df['period_end'])
-                active_df = df[df['period_end_dt'] >= pd.Timestamp.today().normalize()]
-                for _, row in active_df.iterrows():
-                    code = str(row['stock_id'])
-                    measure_text = str(row['measure'])
-                    disposal_dict[code] = {
-                        'period': f"{row['period_start']} ~ {row['period_end']}",
-                        'measure': measure_text,
-                        'match_time': extract_match_time(measure_text),
-                        'match_time_short': extract_match_time_short(measure_text)
-                    }
-            return disposal_dict, True
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code == 200: return r.json()
     except: pass
-    return disposal_dict, False
+    proxies = [
+        f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}",
+        f"https://corsproxy.io/?{urllib.parse.quote(url)}"
+    ]
+    for proxy in proxies:
+        try:
+            r = requests.get(proxy, headers=headers, timeout=5)
+            if r.status_code == 200: return r.json()
+        except: pass
+    return None
+
+@st.cache_data(ttl=600)
+def get_combined_disposal_list(token):
+    """雙引擎：同時抓取官方即時與 FinMind 資料，確保不漏接"""
+    disposal_dict = {}
+    
+    # 引擎 1：官方即時 Proxy (補足 FinMind 的時間差)
+    tse_data = fetch_with_proxy("https://www.twse.com.tw/announcement/punish?response=json")
+    if tse_data and 'data' in tse_data:
+        for item in tse_data['data']:
+            if len(item) >= 9:
+                code = item[2].replace('*', '')
+                measure_text = f"{item[7]}：\n{item[8]}"
+                disposal_dict[code] = {'period': item[6], 'measure': measure_text, 'match_time': extract_match_time(measure_text), 'match_time_short': extract_match_time_short(measure_text)}
+                
+    otc_data = fetch_with_proxy("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information")
+    if otc_data and isinstance(otc_data, list):
+        for item in otc_data:
+            code = item.get('SecuritiesCompanyCode', '').replace('*', '')
+            if code:
+                measure_text = item.get('PunishmentMeasure', '')
+                if item.get('PunishmentContent'): measure_text += f"：\n{item.get('PunishmentContent')}"
+                disposal_dict[code] = {'period': item.get('PunishmentPeriod', '未知期間'), 'measure': measure_text, 'match_time': extract_match_time(measure_text), 'match_time_short': extract_match_time_short(measure_text)}
+
+    # 引擎 2：FinMind VIP (最穩定歷史備份)
+    if token and token != "YOUR_FINMIND_TOKEN_HERE":
+        try:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            start_str = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+            url = "https://api.finmindtrade.com/api/v4/data"
+            params = {"dataset": "TaiwanStockDispositionSecuritiesPeriod", "start_date": start_str, "end_date": today_str, "token": token}
+            res = requests.get(url, params=params, timeout=5)
+            data = res.json()
+            if data.get("msg") == "success":
+                df = pd.DataFrame(data["data"])
+                if not df.empty:
+                    df['period_end_dt'] = pd.to_datetime(df['period_end'])
+                    active_df = df[df['period_end_dt'] >= pd.Timestamp.today().normalize()]
+                    for _, row in active_df.iterrows():
+                        code = str(row['stock_id']).replace('*', '')
+                        if code not in disposal_dict:
+                            measure_text = str(row['measure'])
+                            disposal_dict[code] = {
+                                'period': f"{row['period_start']} ~ {row['period_end']}", 'measure': measure_text,
+                                'match_time': extract_match_time(measure_text), 'match_time_short': extract_match_time_short(measure_text)
+                            }
+        except: pass
+        
+    return disposal_dict
 
 @st.cache_data(ttl=3600)
 def get_historical_records(pure_code, is_twse, token):
+    """完美抓取歷史紀錄 (使用 Proxy 突破雲端封鎖)"""
     attn_records, disp_records = [], []
     
-    headers = {"User-Agent": "Mozilla/5.0"}
     if is_twse:
+        # 上市：必須使用 Proxy 防擋
+        url_notice = f"https://www.twse.com.tw/announcement/notice?response=json&stockNo={pure_code}"
+        notice_data = fetch_with_proxy(url_notice)
+        if notice_data and 'data' in notice_data:
+            for item in notice_data['data']: attn_records.append({"日期": item[0], "原因": item[3]})
+
+        url_punish = f"https://www.twse.com.tw/announcement/punish?response=json&stockNo={pure_code}"
+        punish_data = fetch_with_proxy(url_punish)
+        if punish_data and 'data' in punish_data:
+            for item in punish_data['data']: disp_records.append({"處置期間": item[6], "處置內容": item[7]})
+            
+    # 處置紀錄：用 FinMind 補足 (支援上市與上櫃)
+    if token and token != "YOUR_FINMIND_TOKEN_HERE":
         try:
-            r1 = requests.get(f"https://www.twse.com.tw/announcement/notice?response=json&stockNo={pure_code}", headers=headers, timeout=5)
-            if r1.status_code == 200:
-                for item in r1.json().get('data', []): attn_records.append({"日期": item[0], "原因": item[3]})
-            r2 = requests.get(f"https://www.twse.com.tw/announcement/punish?response=json&stockNo={pure_code}", headers=headers, timeout=5)
-            if r2.status_code == 200:
-                for item in r2.json().get('data', []): disp_records.append({"處置期間": item[6], "處置內容": item[7]})
+            url = "https://api.finmindtrade.com/api/v4/data"
+            params = {"dataset": "TaiwanStockDispositionSecuritiesPeriod", "start_date": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"), "end_date": datetime.now().strftime("%Y-%m-%d"), "data_id": pure_code, "token": token}
+            res = requests.get(url, params=params, timeout=5)
+            data = res.json()
+            if data.get("msg") == "success" and data.get("data"):
+                for item in data["data"]:
+                    if str(item['stock_id']).replace('*', '') == pure_code:
+                        period_str = f"{item['period_start']} ~ {item['period_end']}"
+                        if not any(d.get("處置期間") == period_str for d in disp_records):
+                            disp_records.append({"處置期間": period_str, "處置內容": item['measure']})
         except: pass
-    else:
-        if token and token != "YOUR_FINMIND_TOKEN_HERE":
-            try:
-                url = "https://api.finmindtrade.com/api/v4/data"
-                params = {"dataset": "TaiwanStockDispositionSecuritiesPeriod", "start_date": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"), "end_date": datetime.now().strftime("%Y-%m-%d"), "data_id": pure_code, "token": token}
-                res = requests.get(url, params=params, timeout=5)
-                data = res.json()
-                if data.get("msg") == "success" and data.get("data"):
-                    for item in data["data"]:
-                        if str(item['stock_id']) == pure_code:
-                            disp_records.append({"處置期間": f"{item['period_start']} ~ {item['period_end']}", "處置內容": item['measure']})
-            except: pass
-        attn_records = [{"日期": "系統提示", "原因": "上櫃歷史注意股請點擊連結前往官方查詢。"}]
+        
+    if not is_twse:
+        attn_records = [{"日期": "系統提示", "原因": "上櫃股票歷史注意紀錄目前不支援單一 API 查詢，請點擊連結前往官方查詢。"}]
 
     return pd.DataFrame(attn_records), pd.DataFrame(disp_records)
 
@@ -182,7 +185,7 @@ def simulate_future(prices, current_streak, direction='up'):
 
 # --- UI 介面開始 ---
 stock_dict = get_stock_dict()
-official_disposal, api_success = get_finmind_disposal_list(FINMIND_TOKEN)
+official_disposal = get_combined_disposal_list(FINMIND_TOKEN)
 
 # 頂部搜尋列
 if not stock_dict:
@@ -193,14 +196,14 @@ if not stock_dict:
 else:
     search = st.selectbox("🔍 搜尋股票", options=list(stock_dict.keys()), index=list(stock_dict.keys()).index("2454 聯發科") if "2454 聯發科" in stock_dict else 0)
     ticker_info = stock_dict[search]
-    pure_code = search.split()[0]
+    pure_code = search.split()[0].replace('*', '') # 嚴格濾除星號
     stock_name = search.split()[1] if len(search.split()) > 1 else pure_code
 
 is_twse = ticker_info['market_name'] == "上市"
 clean_ticker = ticker_info['ticker']
 is_disposal_now = pure_code in official_disposal
 
-# 獲取歷史價量
+# 🚀 強制消滅 NaN：抓取價量並嚴格清洗
 df = pd.DataFrame()
 try:
     df = yf.download(clean_ticker, period="120d", progress=False)
@@ -211,11 +214,11 @@ price_change, price_pct = 0, 0
 color_class = ""
 
 if not df.empty and 'Close' in df:
-    closes = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-    vols = df['Volume'].iloc[:, 0] if isinstance(df['Volume'], pd.DataFrame) else df['Volume']
-    closes = closes.dropna()
-    vols = vols.dropna()
-    if len(closes) >= 2:
+    # 嚴格拋棄所有包含 NaN 的無效日期
+    df = df.dropna(subset=['Close', 'Volume'])
+    if len(df) >= 2:
+        closes = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+        vols = df['Volume'].iloc[:, 0] if isinstance(df['Volume'], pd.DataFrame) else df['Volume']
         today_close = closes.iloc[-1]
         yesterday_close = closes.iloc[-2]
         volume = vols.iloc[-1]
@@ -261,7 +264,7 @@ with top_col2:
         period = official_disposal[pure_code]['period']
         st.markdown(f'<div class="metric-value">處置期間：{period}</div>', unsafe_allow_html=True)
         st.progress(100) # 顯示全滿代表正在處置
-    elif len(closes) >= 90:
+    elif 'closes' in locals() and len(closes) >= 90:
         history_prices = closes.tolist()
         current_consecutive = 0
         test_list = history_prices.copy()
@@ -274,7 +277,6 @@ with top_col2:
         
         if days_up:
             st.markdown(f'<div class="metric-value">🔥 最快 {days_up} 日後再次處置</div>', unsafe_allow_html=True)
-            # 將 1~3 天轉換為進度條 (越快處置進度條越長)
             risk_pct = max(0, min(100, 100 - (days_up * 33))) 
             st.progress(int(risk_pct))
             st.caption(f"預估漲停觸發價：{price_up:.2f} | 目前連 {current_consecutive} 日注意")
@@ -298,26 +300,23 @@ def metric_card(col, label, value, color="white"):
     </div>
     """, unsafe_allow_html=True)
 
-# Row 1
 metric_card(col_a, "成交張數", f"{volume/1000:.1f} 萬張" if volume > 0 else "N/A")
 metric_card(col_b, "預估成交值", f"{(volume * today_close)/100000000:.1f} 億" if volume > 0 else "N/A")
 metric_card(col_c, "週轉率", "N/A")
 metric_card(col_d, "券資比", "N/A")
 
-# Row 2
 metric_card(col_a, "當沖率", "N/A", color="#f5c518")
 metric_card(col_b, "當沖獲利", "N/A")
 metric_card(col_c, "當沖獲利率", "N/A")
 metric_card(col_d, "當沖成交量", "N/A")
 
-# Row 3
 metric_card(col_a, "三大法人買賣超", "N/A")
 metric_card(col_b, "外資買賣", "N/A")
 metric_card(col_c, "投信買賣", "N/A")
 metric_card(col_d, "自營商買賣", "N/A")
 
 # ==========================================
-# 📜 歷史查詢模組 (保留你的需求)
+# 📜 歷史查詢模組 (完整表格展開)
 # ==========================================
 st.markdown("<br><h5>想查詢注意股或處置股歷史公告？</h5>", unsafe_allow_html=True)
 df_attn, df_disp = get_historical_records(pure_code, is_twse, FINMIND_TOKEN)
@@ -328,7 +327,7 @@ with hist_col1:
     with st.expander(f"📜 歷史【注意股】紀錄 (共 {attn_count} 次)"):
         if not df_attn.empty: st.dataframe(df_attn, hide_index=True, use_container_width=True)
         else: st.write("近期無紀錄。")
-        if not is_twse: st.link_button("前往官方查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
+        if not is_twse: st.link_button("前往櫃買官方查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
             
 with hist_col2:
     with st.expander(f"🛑 歷史【處置股】紀錄 (共 {len(df_disp)} 次)"):
