@@ -7,25 +7,49 @@ import plotly.graph_objects as go
 # 設定網頁標題與圖示
 st.set_page_config(page_title="台股處置預警雷達", layout="wide")
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400) # 名單一天更新一次即可
 def get_stock_dict():
-    """自動獲取全市場代碼與名稱"""
+    """透過開源 API 獲取全市場代碼與名稱 (可突破政府海外 IP 封鎖)"""
     mapping = {}
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+    
+    # 🌟 優先使用 FinMind 開源 API (不會阻擋海外 IP)
     try:
-        res_tse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10)
+        url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json().get('data', [])
+            for item in data:
+                code = item.get('stock_id', '')
+                name = item.get('stock_name', '')
+                market = item.get('type', '')
+                
+                # 只篩選 4 碼的上市櫃一般股票
+                if len(code) == 4 and code.isdigit():
+                    suffix = ".TW" if market == 'twse' else ".TWO"
+                    mapping[f"{code} {name}"] = f"{code}{suffix}"
+            
+            if mapping:
+                return mapping # 如果成功抓到，直接回傳
+    except:
+        pass
+
+    # 備用方案：證交所官方 API (如果在台灣本機執行會走這條路)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res_tse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=5)
         if res_tse.status_code == 200:
             for item in res_tse.json():
                 if len(item['Code']) == 4 and item['Code'].isdigit():
                     mapping[f"{item['Code']} {item['Name']}"] = f"{item['Code']}.TW"
         
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=10)
+        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=5)
         if res_otc.status_code == 200:
             for item in res_otc.json():
                 if len(item['SecuritiesCompanyCode']) == 4 and item['SecuritiesCompanyCode'].isdigit():
                     mapping[f"{item['SecuritiesCompanyCode']} {item['CompanyName']}"] = f"{item['SecuritiesCompanyCode']}.TWO"
     except:
-        pass # 被擋了就不做事，讓 mapping 保持空白
+        pass 
+        
     return mapping
 
 def extract_match_time(text):
@@ -36,13 +60,13 @@ def extract_match_time(text):
 
 @st.cache_data(ttl=600)
 def get_official_disposal_list():
-    """連線政府 API，抓取官方目前正在處置中的名單與細節"""
+    """連線政府 API 抓處置名單 (此部分若在雲端仍可能被擋，會優雅降級)"""
     disposal_dict = {}
-    api_success = False # 新增一個旗標，判斷 API 是否成功連線
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+    api_success = False 
+    headers = {"User-Agent": "Mozilla/5.0"}
     
     try:
-        res_tse = requests.get("https://www.twse.com.tw/announcement/punish?response=json", headers=headers, timeout=5)
+        res_tse = requests.get("https://www.twse.com.tw/announcement/punish?response=json", headers=headers, timeout=3)
         if res_tse.status_code == 200:
             api_success = True
             data = res_tse.json().get('data', [])
@@ -56,7 +80,7 @@ def get_official_disposal_list():
     except: pass
     
     try:
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=5)
+        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=3)
         if res_otc.status_code == 200:
             api_success = True
             for item in res_otc.json():
@@ -70,21 +94,6 @@ def get_official_disposal_list():
     except: pass
     
     return disposal_dict, api_success
-
-@st.cache_data(ttl=3600)
-def get_twse_history(stock_code):
-    """抓取上市股票的【注意】與【處置】歷史紀錄"""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    attn_list, disp_list = [], []
-    try:
-        r1 = requests.get(f"https://www.twse.com.tw/announcement/notice?response=json&stockNo={stock_code}", headers=headers, timeout=5)
-        if r1.status_code == 200:
-            for item in r1.json().get('data', []): attn_list.append({"公告日期": item[0], "累計/詳細原因": item[3]})
-        r2 = requests.get(f"https://www.twse.com.tw/announcement/punish?response=json&stockNo={stock_code}", headers=headers, timeout=5)
-        if r2.status_code == 200:
-            for item in r2.json().get('data', []): disp_list.append({"公告日期": item[0], "處置期間": item[6], "處置內容": item[7]})
-    except: pass
-    return pd.DataFrame(attn_list), pd.DataFrame(disp_list)
 
 # 核心計算邏輯
 def check_attention(prices_list):
@@ -105,7 +114,7 @@ def simulate_future(prices, current_streak, direction='up'):
 
 # --- UI 介面 ---
 st.title("🎯 台股處置風險預警雷達")
-st.markdown("提供歷史違規溯源與未來情境推演。(註：若遇雲端 IP 阻擋，核心預測功能仍可正常運作)")
+st.markdown("提供歷史違規溯源與未來情境推演。(核心價格計算完全不受雲端封鎖影響)")
 
 mode = st.sidebar.selectbox("選擇模式", ["個股深度診斷", "全市場掃描 (建置中)"])
 stock_dict = get_stock_dict()
@@ -120,13 +129,18 @@ if mode == "個股深度診斷":
         pure_code = ""
         ticker = ""
         
-        # 🛡️ 雲端防彈設計：如果字典抓不到，自動變成手動輸入
         if not stock_dict:
-            st.warning("⚠️ 海外雲端主機遭政府 API 阻擋，已切換為「手動輸入模式」。")
-            user_input = st.text_input("請直接輸入 4 碼股票代碼 (例如：2454 或 6274)", "2454").strip()
+            # 這是最壞情況：所有名單來源全掛
+            st.warning("⚠️ 無法獲取股票清單，已切換為手動輸入模式。")
+            user_input = st.text_input("請輸入 4 碼股票代碼 (例: 2454)", "2454").strip()
             pure_code = user_input
         else:
-            search = st.selectbox("搜尋股票 (支援代碼或名稱)", options=list(stock_dict.keys()), index=0)
+            # 🌟 成功突破！提供帶有「聯想搜尋」功能的智慧選單
+            search = st.selectbox(
+                "🔍 搜尋股票 (可直接輸入代碼或中文名稱，系統會自動聯想)", 
+                options=list(stock_dict.keys()), 
+                index=list(stock_dict.keys()).index("2454 聯發科") if "2454 聯發科" in stock_dict else 0
+            )
             ticker = stock_dict[search]
             pure_code = ticker.split('.')[0] 
             
@@ -140,34 +154,30 @@ if mode == "個股深度診斷":
             with st.expander("📝 點此展開查看官方完整處置內容與規定"):
                 st.markdown(status_info['measure'])
         elif not api_success:
-            # 🛡️ 雲端防彈設計：如果處置名單也被擋，警告使用者
-            st.warning("⚠️ 雲端主機遭證交所阻擋，無法確認官方處置名單，請參考右側儀表板自行評估風險。")
+            st.warning("⚠️ 雲端主機遭證交所阻擋，無法確認目前是否為處置股，請參考下方歷史公告連結，或看右側儀表板評估。")
         else:
             st.success("✅ 官方狀態：目前為正常交易 (非處置股)")
             
         # 歷史公告查詢區塊
         st.markdown("---")
-        st.markdown("**想查詢歷史公告？(若無畫面代表政府 API 阻擋海外連線)**")
+        st.markdown("**想查詢官方處置/注意歷史公告？**")
         hist_col1, hist_col2 = st.columns(2)
-        
-        # 上櫃查詢按鈕 (無論如何都顯示)
         with hist_col1: st.link_button("📜 櫃買【注意股】查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
         with hist_col2: st.link_button("🛑 櫃買【處置股】查詢", "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw")
         
         st.markdown("---")
         
-        # 🛡️ 雲端防彈設計：智慧抓取 Yahoo 資料
-        with st.spinner('正在從 Yahoo Finance 載入價量資料 (不受政府封鎖)...'):
+        # Yahoo Finance 抓價量資料
+        with st.spinner('正在載入最新價量資料與運算...'):
             df = pd.DataFrame()
             try:
-                # 如果是手動輸入，先猜上市 (.TW)，找不到再猜上櫃 (.TWO)
                 if not ticker:
                     test_ticker = f"{pure_code}.TW"
                     df = yf.download(test_ticker, period="120d", progress=False)
                     if df.empty or 'Close' not in df:
                         test_ticker = f"{pure_code}.TWO"
                         df = yf.download(test_ticker, period="120d", progress=False)
-                    ticker = test_ticker # 確定正確代碼
+                    ticker = test_ticker 
                 else:
                     df = yf.download(ticker, period="120d", progress=False)
             except: pass
