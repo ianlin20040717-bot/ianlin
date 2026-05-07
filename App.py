@@ -3,16 +3,15 @@ import yfinance as yf
 import pandas as pd
 import requests
 import plotly.graph_objects as go
+import urllib.parse
 
 # 設定網頁標題與圖示
 st.set_page_config(page_title="台股處置預警雷達", layout="wide")
 
-@st.cache_data(ttl=86400) # 名單一天更新一次即可
+@st.cache_data(ttl=86400)
 def get_stock_dict():
     """透過開源 API 獲取全市場代碼與名稱 (可突破政府海外 IP 封鎖)"""
     mapping = {}
-    
-    # 🌟 優先使用 FinMind 開源 API (不會阻擋海外 IP)
     try:
         url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
         res = requests.get(url, timeout=10)
@@ -22,34 +21,25 @@ def get_stock_dict():
                 code = item.get('stock_id', '')
                 name = item.get('stock_name', '')
                 market = item.get('type', '')
-                
-                # 只篩選 4 碼的上市櫃一般股票
                 if len(code) == 4 and code.isdigit():
                     suffix = ".TW" if market == 'twse' else ".TWO"
                     mapping[f"{code} {name}"] = f"{code}{suffix}"
-            
-            if mapping:
-                return mapping # 如果成功抓到，直接回傳
-    except:
-        pass
+            if mapping: return mapping 
+    except: pass
 
-    # 備用方案：證交所官方 API (如果在台灣本機執行會走這條路)
+    # 備用方案：證交所官方 API
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res_tse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=5)
         if res_tse.status_code == 200:
             for item in res_tse.json():
-                if len(item['Code']) == 4 and item['Code'].isdigit():
-                    mapping[f"{item['Code']} {item['Name']}"] = f"{item['Code']}.TW"
+                if len(item['Code']) == 4 and item['Code'].isdigit(): mapping[f"{item['Code']} {item['Name']}"] = f"{item['Code']}.TW"
         
         res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=5)
         if res_otc.status_code == 200:
             for item in res_otc.json():
-                if len(item['SecuritiesCompanyCode']) == 4 and item['SecuritiesCompanyCode'].isdigit():
-                    mapping[f"{item['SecuritiesCompanyCode']} {item['CompanyName']}"] = f"{item['SecuritiesCompanyCode']}.TWO"
-    except:
-        pass 
-        
+                if len(item['SecuritiesCompanyCode']) == 4 and item['SecuritiesCompanyCode'].isdigit(): mapping[f"{item['SecuritiesCompanyCode']} {item['CompanyName']}"] = f"{item['SecuritiesCompanyCode']}.TWO"
+    except: pass 
     return mapping
 
 def extract_match_time(text):
@@ -58,41 +48,51 @@ def extract_match_time(text):
     elif "十分" in text or "10分" in text: return "⚠️ 10分鐘撮合"
     else: return "🔍 特殊人工撮合"
 
+def fetch_with_proxy(url):
+    """🛡️ 防彈機制：如果被封鎖，自動切換代理伺服器繞道抓取"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
+    # 1. 嘗試直接連線
+    try:
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code == 200: return r.json()
+    except: pass
+    
+    # 2. 若被擋，透過 allorigins 代理伺服器繞道
+    try:
+        encoded_url = urllib.parse.quote(url)
+        proxy_url = f"https://api.allorigins.win/raw?url={encoded_url}"
+        r = requests.get(proxy_url, headers=headers, timeout=5)
+        if r.status_code == 200: return r.json()
+    except: pass
+    return None
+
 @st.cache_data(ttl=600)
 def get_official_disposal_list():
-    """連線政府 API 抓處置名單 (此部分若在雲端仍可能被擋，會優雅降級)"""
+    """抓取官方處置名單 (具備 Proxy 突破能力)"""
     disposal_dict = {}
     api_success = False 
-    headers = {"User-Agent": "Mozilla/5.0"}
     
-    try:
-        res_tse = requests.get("https://www.twse.com.tw/announcement/punish?response=json", headers=headers, timeout=3)
-        if res_tse.status_code == 200:
-            api_success = True
-            data = res_tse.json().get('data', [])
-            for item in data:
-                if len(item) >= 9:
-                    code = item[2]
-                    measure_text = f"{item[7]}：\n{item[8]}"
-                    disposal_dict[code] = {
-                        'period': item[6], 'measure': measure_text, 'match_time': extract_match_time(measure_text)
-                    }
-    except: pass
-    
-    try:
-        res_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=3)
-        if res_otc.status_code == 200:
-            api_success = True
-            for item in res_otc.json():
-                code = item.get('SecuritiesCompanyCode', '')
-                if code:
-                    measure_text = item.get('PunishmentMeasure', '')
-                    if item.get('PunishmentContent'): measure_text += f"：\n{item.get('PunishmentContent')}"
-                    disposal_dict[code] = {
-                        'period': item.get('PunishmentPeriod', '未知期間'), 'measure': measure_text, 'match_time': extract_match_time(measure_text)
-                    }
-    except: pass
-    
+    # 抓取上市
+    tse_data = fetch_with_proxy("https://www.twse.com.tw/announcement/punish?response=json")
+    if tse_data and 'data' in tse_data:
+        api_success = True
+        for item in tse_data['data']:
+            if len(item) >= 9:
+                code = item[2]
+                measure_text = f"{item[7]}：\n{item[8]}"
+                disposal_dict[code] = {'period': item[6], 'measure': measure_text, 'match_time': extract_match_time(measure_text)}
+                
+    # 抓取上櫃
+    otc_data = fetch_with_proxy("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information")
+    if otc_data and isinstance(otc_data, list):
+        api_success = True
+        for item in otc_data:
+            code = item.get('SecuritiesCompanyCode', '')
+            if code:
+                measure_text = item.get('PunishmentMeasure', '')
+                if item.get('PunishmentContent'): measure_text += f"：\n{item.get('PunishmentContent')}"
+                disposal_dict[code] = {'period': item.get('PunishmentPeriod', '未知期間'), 'measure': measure_text, 'match_time': extract_match_time(measure_text)}
+                
     return disposal_dict, api_success
 
 # 核心計算邏輯
@@ -130,12 +130,10 @@ if mode == "個股深度診斷":
         ticker = ""
         
         if not stock_dict:
-            # 這是最壞情況：所有名單來源全掛
             st.warning("⚠️ 無法獲取股票清單，已切換為手動輸入模式。")
             user_input = st.text_input("請輸入 4 碼股票代碼 (例: 2454)", "2454").strip()
             pure_code = user_input
         else:
-            # 🌟 成功突破！提供帶有「聯想搜尋」功能的智慧選單
             search = st.selectbox(
                 "🔍 搜尋股票 (可直接輸入代碼或中文名稱，系統會自動聯想)", 
                 options=list(stock_dict.keys()), 
@@ -144,7 +142,6 @@ if mode == "個股深度診斷":
             ticker = stock_dict[search]
             pure_code = ticker.split('.')[0] 
             
-        # 官方處置狀態判定
         is_disposal_now = pure_code in official_disposal
         
         if is_disposal_now:
@@ -154,20 +151,20 @@ if mode == "個股深度診斷":
             with st.expander("📝 點此展開查看官方完整處置內容與規定"):
                 st.markdown(status_info['measure'])
         elif not api_success:
-            st.warning("⚠️ 雲端主機遭證交所阻擋，無法確認目前是否為處置股，請參考下方歷史公告連結，或看右側儀表板評估。")
+            # 🎨 優化：如果連 Proxy 也被擋，就顯示一個低調的藍色資訊框，而不是刺眼的黃色警告
+            st.info("☁️ **雲端運行模式限制**\n\n受限於證交所海外 IP 封鎖，目前無法即時連線官方處置名單。請直接依賴右側雷達預測，或點擊下方按鈕查詢官方歷史。")
         else:
             st.success("✅ 官方狀態：目前為正常交易 (非處置股)")
             
-        # 歷史公告查詢區塊
+        # 歷史公告查詢區塊 (✅ 已根據要求修改按鈕名稱)
         st.markdown("---")
         st.markdown("**想查詢官方處置/注意歷史公告？**")
         hist_col1, hist_col2 = st.columns(2)
-        with hist_col1: st.link_button("📜 櫃買【注意股】查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
-        with hist_col2: st.link_button("🛑 櫃買【處置股】查詢", "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw")
+        with hist_col1: st.link_button("📜 歷史【注意股】查詢", "https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw")
+        with hist_col2: st.link_button("🛑 歷史【處置股】查詢", "https://www.tpex.org.tw/web/bulletin/disposal_information/disposal_information_result.php?l=zh-tw")
         
         st.markdown("---")
         
-        # Yahoo Finance 抓價量資料
         with st.spinner('正在載入最新價量資料與運算...'):
             df = pd.DataFrame()
             try:
