@@ -19,7 +19,7 @@ st.markdown("""
     .card-container { background-color: #1e1e26; border-radius: 12px; padding: 20px; margin-bottom: 15px; border: 1px solid #333; box-shadow: 2px 2px 10px rgba(0,0,0,0.3); }
     .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; }
     .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
-    .metric-sub { font-size: 14px; font-weight: 500; margin-top: 5px;}
+    .metric-sub { font-size: 13px; font-weight: 500; margin-top: 5px; color: #888; }
     
     /* 頂部標籤列排版 */
     .tags-container { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; height: 100%; padding-bottom: 5px; }
@@ -27,7 +27,7 @@ st.markdown("""
     /* 標籤樣式 */
     .tag-base { padding: 4px 12px; border-radius: 4px; font-size: 13px; font-weight: 600; border: 1px solid #444; }
     .t-market { background-color: #2e2e38; color: #ddd; }
-    .t-warn { background-color: #ffc107; color: #000; border: none; }
+    .t-warn { background-color: #ffc107; color: #000; border: none; font-size: 14px; }
     .t-on { background-color: #3b3b4f; color: #fff; border-color: #666; }
     .t-off { background-color: #1a1a21; color: #555; border-color: #333; }
     
@@ -95,13 +95,14 @@ with top_col1:
 info = stock_list[search]
 sid = info['id']
 start_str = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") # 拉長籌碼抓取時間防止長假
 
 # 一次性抓取所有必要資料
 with st.spinner("正在載入盤後數據..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
-    df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
-    df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
-    df_day = api_request("TaiwanStockDayTrading", sid, (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
+    df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
+    df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
+    df_day = api_request("TaiwanStockDayTrading", sid, safe_start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
 
 # 處理處置狀態
@@ -130,25 +131,25 @@ if not df_price.empty:
     pct = (diff / p_prev) * 100 if p_prev > 0 else 0
     c_class = "red-text" if diff > 0 else "green-text" if diff < 0 else ""
     today_vol = vols.iloc[-1]
+    price_date_str = pd.to_datetime(df_price.index[-1]).strftime('%m/%d')
 else:
-    p_now, today_vol = 0, 0
+    p_now, today_vol, price_date_str = 0, 0, ""
 
-# 準備標籤亮燈邏輯
+# 🛡️ 智能標籤體質判定 (掃描過去20天確保不漏接)
 market_name = "上市" if info['market'] == 'twse' else "上櫃"
-margin_bal = df_margin['MarginPurchaseTodayBalance'].iloc[-1] if not df_margin.empty and 'MarginPurchaseTodayBalance' in df_margin.columns else 0
-short_bal = df_margin['ShortSaleTodayBalance'].iloc[-1] if not df_margin.empty and 'ShortSaleTodayBalance' in df_margin.columns else 0
-day_trade_vol = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].iloc[-1] if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else 0
+can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
+can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
+can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
 
-tag_margin = "t-on" if margin_bal > 0 else "t-off"
-tag_short = "t-on" if short_bal > 0 else "t-off"
-tag_day = "t-on" if day_trade_vol > 0 and not is_punished else "t-off" 
+tag_margin = "t-on" if can_margin else "t-off"
+tag_short = "t-on" if can_short else "t-off"
+tag_day = "t-on" if can_day and not is_punished else "t-off" # 處置期間依法禁止當沖，標籤自動熄滅
 
 # 💡 智能期權標籤判定
 large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2891', '2609', '2615', '3008', '2303', '1101']
 tag_future = "t-on" if sid in large_caps or today_vol > 10000000 else "t-off"
 tag_warrant = "t-on" if sid in large_caps or today_vol > 3000000 else "t-off"
 
-# 🚀 修正：消除縮排陷阱，保證 HTML 安全渲染
 with top_col2:
     tags_html = '<div class="tags-container">'
     tags_html += f'<span class="tag-base t-market">{market_name}</span>'
@@ -171,7 +172,6 @@ if not df_price.empty:
     # --- 第一行看板 ---
     c1, c2 = st.columns(2)
     with c1:
-        # 消除縮排陷阱
         p_html = (
             '<div class="card-container">'
             '<div class="metric-label">收盤價</div>'
@@ -200,13 +200,15 @@ if not df_price.empty:
                 if calc_risk(tmp): streak += 1; tmp.pop()
                 else: break
             d, p = simulate(list(closes), streak)
+            p_warn = closes.iloc[-5] * 1.25 if len(closes) >= 6 else 0
+            
             if d:
                 risk_width = max(0, min(100, 100 - (d * 10)))
                 html_content = (
                     '<div class="card-container">'
                     '<div class="metric-label">風險預測</div>'
                     f'<div class="metric-value" style="color:#ffc107;">🔥 T+{d} 可能處置</div>'
-                    f'<div class="metric-sub">預估門檻價：{p:.2f}</div>'
+                    f'<div class="metric-sub">注意門檻：{p_warn:.2f} ｜ 處置門檻：{p:.2f}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     f'<div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -217,21 +219,20 @@ if not df_price.empty:
                     '<div class="card-container">'
                     '<div class="metric-label">風險分析</div>'
                     '<div class="metric-value" style="color:#00ff00;">✅ 目前風險等級：低</div>'
-                    '<div class="metric-sub" style="color:transparent;">_</div>'
+                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
                 )
                 st.markdown(html_content, unsafe_allow_html=True)
 
-    # --- 九宮格數據區 ---
+    # --- 矩陣數據區 (共 3 列) ---
     def m_card(c, l, v, clr="white", sub=""):
-        # 消除縮排陷阱
         card_html = (
             '<div class="card-container" style="padding:15px;">'
             f'<div class="metric-label">{l}</div>'
             f'<div class="metric-value" style="font-size:22px; color:{clr};">{v}</div>'
-            f'<div class="metric-sub" style="color:#888;">{sub}</div>'
+            f'<div class="metric-sub">{sub}</div>'
             '</div>'
         )
         c.markdown(card_html, unsafe_allow_html=True)
@@ -240,46 +241,67 @@ if not df_price.empty:
     col_r1 = st.columns(4)
     vol_lots = today_vol / 1000 
     turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
-    short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
+    
+    short_ratio, margin_date_sub = 0, ""
+    if not df_margin.empty and 'MarginPurchaseTodayBalance' in df_margin.columns:
+        last_margin_row = df_margin.iloc[-1]
+        margin_date_sub = f"({pd.to_datetime(last_margin_row['date']).strftime('%m/%d')})"
+        margin_bal = last_margin_row['MarginPurchaseTodayBalance']
+        short_bal = last_margin_row.get('ShortSaleTodayBalance', 0)
+        short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
 
-    m_card(col_r1[0], "成交張數", f"{vol_lots:,.0f} 張")
-    m_card(col_r1[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億")
-    m_card(col_r1[2], "週轉率", f"{turnover:.2f} 倍均量")
-    m_card(col_r1[3], "券資比", f"{short_ratio:.1f}%")
+    m_card(col_r1[0], "成交張數", f"{vol_lots:,.0f} 張", sub=f"({price_date_str})")
+    m_card(col_r1[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億", sub=f"({price_date_str})")
+    m_card(col_r1[2], "週轉率", f"{turnover:.2f} 倍", sub="相對於均量")
+    m_card(col_r1[3], "券資比", f"{short_ratio:.1f}%", sub=margin_date_sub)
 
     # 📏 第 2 列：當沖率、當沖獲利、當沖獲利率、當沖成交張數
     col_r2 = st.columns(4)
-    day_pct, day_vol_lots = 0, 0
-    if day_trade_vol > 0:
+    day_pct, day_vol_lots, day_date_sub = 0, 0, ""
+    if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns:
+        last_day_row = df_day.iloc[-1]
+        day_date = last_day_row['date']
+        day_date_sub = f"({pd.to_datetime(day_date).strftime('%m/%d')})"
+        day_trade_vol = last_day_row['Buy_After_Day_Trading_Sell_Trade_Volume']
+        
+        # 對齊該日成交量計算最精準當沖率
+        match_price = df_price[df_price.index == pd.to_datetime(day_date)]
+        match_vol = match_price['Trading_Volume'].iloc[0] if not match_price.empty else 0
         day_vol_lots = day_trade_vol / 1000
-        day_pct = (day_trade_vol / today_vol) * 100 if today_vol > 0 else 0
+        day_pct = (day_trade_vol / match_vol) * 100 if match_vol > 0 else 0
 
-    m_card(col_r2[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518")
-    m_card(col_r2[1], "當沖獲利", "N/A", clr="#555")       # 官方 API 無提供此項
-    m_card(col_r2[2], "當沖獲利率", "N/A", clr="#555")     # 官方 API 無提供此項
-    m_card(col_r2[3], "當沖成交張數", f"{day_vol_lots:,.0f} 張")
+    m_card(col_r2[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518", sub=day_date_sub)
+    m_card(col_r2[1], "當沖獲利", "N/A", clr="#555")       
+    m_card(col_r2[2], "當沖獲利率", "N/A", clr="#555")     
+    m_card(col_r2[3], "當沖成交張數", f"{day_vol_lots:,.0f} 張", sub=day_date_sub)
 
-    # 📏 第 3 列：法人買賣超 (金額化 + 智慧紅綠燈)
+    # 📏 第 3 列：三大法人 (精準紅綠燈與金額)
     col_r3 = st.columns(4)
     f_amt, t_amt, d_amt, total_amt = 0, 0, 0, 0
+    inst_date_sub = ""
     if not df_inst.empty:
-        last_date = df_inst['date'].max()
-        daily_inst = df_inst[df_inst['date'] == last_date]
+        last_inst_date = df_inst['date'].max()
+        inst_date_sub = f"({pd.to_datetime(last_inst_date).strftime('%m/%d')})"
+        daily_inst = df_inst[df_inst['date'] == last_inst_date]
         inst_net = daily_inst.groupby('name')['buy'].sum() - daily_inst.groupby('name')['sell'].sum()
+        
+        # 取得該日收盤價換算金額
+        match_price = df_price[df_price.index == pd.to_datetime(last_inst_date)]
+        target_price = match_price['close'].iloc[0] if not match_price.empty else p_now
         
         f_shares = inst_net.get('Foreign_Investor', 0) + inst_net.get('Foreign_Dealer_Self', 0)
         t_shares = inst_net.get('Investment_Trust', 0)
         d_shares = inst_net.get('Dealer_self', 0) + inst_net.get('Dealer_Hedging', 0)
         
-        f_amt = f_shares * p_now
-        t_amt = t_shares * p_now
-        d_amt = d_shares * p_now
+        f_amt = f_shares * target_price
+        t_amt = t_shares * target_price
+        d_amt = d_shares * target_price
         total_amt = f_amt + t_amt + d_amt
 
     def format_inst_amt(val):
         if val == 0: return "0", "white"
         sign = "+" if val > 0 else ""
-        clr = "#ff4b4b" if val > 0 else "#00ff00" # 紅買綠賣
+        clr = "#ff4b4b" if val > 0 else "#00ff00" 
         if abs(val) >= 100000000:
             return f"{sign}{val/100000000:.2f} 億", clr
         else:
@@ -290,12 +312,12 @@ if not df_price.empty:
     t_str, t_clr = format_inst_amt(t_amt)
     d_str, d_clr = format_inst_amt(d_amt)
 
-    m_card(col_r3[0], "三大法人淨買賣金額", total_str, clr=total_clr)
-    m_card(col_r3[1], "外資買賣金額", f_str, clr=f_clr)
-    m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr)
-    m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr)
+    m_card(col_r3[0], "三大法人淨買賣金額", total_str, clr=total_clr, sub=inst_date_sub)
+    m_card(col_r3[1], "外資買賣金額", f_str, clr=f_clr, sub=inst_date_sub)
+    m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr, sub=inst_date_sub)
+    m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
-    # 📏 歷史紀錄 (版面平分設計)
+    # 📏 歷史紀錄 (版面平分設計，限制寬度)
     st.markdown("---")
     h_col1, h_col2 = st.columns(2)
     with h_col1:
