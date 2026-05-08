@@ -12,7 +12,7 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
 # ==========================================
-# 🎨 自訂 CSS (包含動態標籤亮燈系統)
+# 🎨 自訂 CSS (包含動態標籤與紅綠字體)
 # ==========================================
 st.markdown("""
 <style>
@@ -21,8 +21,7 @@ st.markdown("""
     .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
     .metric-sub { font-size: 14px; font-weight: 500; }
     
-    /* 頂部搜尋與標籤列排版 */
-    .search-row { display: flex; align-items: flex-end; margin-bottom: 25px; }
+    /* 頂部標籤列排版 */
     .tags-container { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; height: 100%; padding-bottom: 5px; }
     
     /* 標籤樣式 */
@@ -32,8 +31,8 @@ st.markdown("""
     .t-on { background-color: #3b3b4f; color: #fff; border-color: #666; }
     .t-off { background-color: #1a1a21; color: #555; border-color: #333; }
     
-    .red-text { color: #ff4b4b; }
-    .green-text { color: #00ff00; }
+    .red-text { color: #ff4b4b !important; }
+    .green-text { color: #00ff00 !important; }
     .title-text { font-size: 32px; font-weight: 800; color: #fff; margin-bottom: 25px; }
 </style>
 """, unsafe_allow_html=True)
@@ -58,7 +57,7 @@ def get_all_info():
     mapping = {}
     if not df.empty:
         for _, r in df.iterrows():
-            code = str(r['stock_id'])
+            code = str(r['stock_id']).strip()
             if len(code) == 4 and code.isdigit():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
@@ -109,7 +108,7 @@ with st.spinner("正在載入盤後數據..."):
 is_punished = False
 disp_info = {}
 if not df_disp.empty and 'period_end' in df_disp.columns:
-    df_disp['stock_id'] = df_disp['stock_id'].astype(str) 
+    df_disp['stock_id'] = df_disp['stock_id'].astype(str).str.strip() 
     df_disp['period_end_dt'] = pd.to_datetime(df_disp['period_end'])
     active_disp = df_disp[(df_disp['stock_id'] == sid) & (df_disp['period_end_dt'] >= pd.Timestamp.today().normalize())]
     if not active_disp.empty:
@@ -144,7 +143,7 @@ tag_margin = "t-on" if margin_bal > 0 else "t-off"
 tag_short = "t-on" if short_bal > 0 else "t-off"
 tag_day = "t-on" if day_trade_vol > 0 and not is_punished else "t-off" 
 
-# 💡 智能期權標籤判定 (大型權值股或高周轉熱門股自動亮燈)
+# 💡 智能期權標籤判定：大型權值股或高周轉熱門股自動亮燈
 large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2891', '2609', '2615', '3008', '2303', '1101']
 tag_future = "t-on" if sid in large_caps or today_vol > 10000000 else "t-off"
 tag_warrant = "t-on" if sid in large_caps or today_vol > 3000000 else "t-off"
@@ -192,47 +191,38 @@ if not df_price.empty:
         st.markdown('</div>', unsafe_allow_html=True)
 
     # --- 九宮格數據區 ---
-    col = st.columns(4)
     def m_card(c, l, v, clr="white", sub=""):
-        c.markdown(f'<div class="card-container" style="padding:15px;"><div class="metric-label">{l}</div><div class="metric-value" style="font-size:20px; color:{clr};">{v}</div><div class="metric-sub" style="color:#888;">{sub}</div></div>', unsafe_allow_html=True)
-
-    # 💡 輔助函式：將金額格式化為 億 或 萬
-    def format_amt(val):
-        if val == 0: return "0"
-        sign = "+" if val > 0 else ""
-        if abs(val) >= 100000000: return f"{sign}{val/100000000:.2f} 億"
-        else: return f"{sign}{val/10000:,.0f} 萬"
+        c.markdown(f'<div class="card-container" style="padding:15px;"><div class="metric-label">{l}</div><div class="metric-value" style="font-size:22px; color:{clr};">{v}</div><div class="metric-sub" style="color:#888;">{sub}</div></div>', unsafe_allow_html=True)
 
     # 第一排：純粹的價量數據
+    col_r1 = st.columns(4)
     vol_lots = today_vol / 1000 
     vol_5d_lots = vols.tail(5).mean() / 1000
-    m_card(col[0], "成交張數", f"{vol_lots:,.0f} 張")
-    m_card(col[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億")
-    m_card(col[2], "5日均量", f"{vol_5d_lots:,.0f} 張")
-    m_card(col[3], "明日注意門檻", f"{closes.iloc[-5]*1.25:.2f}" if len(closes) >= 6 else "N/A", clr="#ffc107")
+    m_card(col_r1[0], "成交張數", f"{vol_lots:,.0f} 張")
+    m_card(col_r1[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億")
+    m_card(col_r1[2], "5日均量", f"{vol_5d_lots:,.0f} 張")
+    m_card(col_r1[3], "明日注意門檻", f"{closes.iloc[-5]*1.25:.2f}" if len(closes) >= 6 else "N/A", clr="#ffc107")
 
-    # 第二排：當沖與券資
+    # 第二排：當沖與週轉
+    col_r2 = st.columns(3)
     day_pct, day_vol_lots = 0, 0
     if day_trade_vol > 0:
         day_vol_lots = day_trade_vol / 1000
         day_pct = (day_trade_vol / today_vol) * 100 if today_vol > 0 else 0
-
-    short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
     turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
 
-    m_card(col[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518")
-    m_card(col[1], "當沖成交張數", f"{day_vol_lots:,.0f} 張")
-    m_card(col[2], "券資比", f"{short_ratio:.1f}%")
-    m_card(col[3], "週轉率", f"{turnover:.2f} 倍均量")
+    m_card(col_r2[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518")
+    m_card(col_r2[1], "當沖成交張數", f"{day_vol_lots:,.0f} 張")
+    m_card(col_r2[2], "週轉率", f"{turnover:.2f} 倍均量")
 
-    # 第三排：法人買賣超 (全新改版：金額顯示)
+    # 第三排：法人買賣超 (金額 + 智慧紅綠燈)
+    col_r3 = st.columns(4)
     f_amt, t_amt, d_amt, total_amt = 0, 0, 0, 0
     if not df_inst.empty:
         last_date = df_inst['date'].max()
         daily_inst = df_inst[df_inst['date'] == last_date]
         inst_net = daily_inst.groupby('name')['buy'].sum() - daily_inst.groupby('name')['sell'].sum()
         
-        # 取得各自淨買賣股數，再乘上收盤價算出真實金額 (元)
         f_shares = inst_net.get('Foreign_Investor', 0) + inst_net.get('Foreign_Dealer_Self', 0)
         t_shares = inst_net.get('Investment_Trust', 0)
         d_shares = inst_net.get('Dealer_self', 0) + inst_net.get('Dealer_Hedging', 0)
@@ -242,18 +232,35 @@ if not df_price.empty:
         d_amt = d_shares * p_now
         total_amt = f_amt + t_amt + d_amt
 
-    m_card(col[0], "三大法人買賣超", format_amt(total_amt), clr="#f5c518" if total_amt > 0 else "white")
-    m_card(col[1], "外資買賣超", format_amt(f_amt))
-    m_card(col[2], "投信買賣超", format_amt(t_amt))
-    m_card(col[3], "自營商買賣超", format_amt(d_amt))
+    # 💡 買賣超金額格式化器 (附加顏色)
+    def format_inst_amt(val):
+        if val == 0: return "0", "white"
+        sign = "+" if val > 0 else ""
+        clr = "#ff4b4b" if val > 0 else "#00ff00" # 紅買綠賣
+        if abs(val) >= 100000000:
+            return f"{sign}{val/100000000:.2f} 億", clr
+        else:
+            return f"{sign}{val/10000:,.0f} 萬", clr
 
-    # 歷史紀錄
+    total_str, total_clr = format_inst_amt(total_amt)
+    f_str, f_clr = format_inst_amt(f_amt)
+    t_str, t_clr = format_inst_amt(t_amt)
+    d_str, d_clr = format_inst_amt(d_amt)
+
+    m_card(col_r3[0], "三大法人買賣超", total_str, clr=total_clr)
+    m_card(col_r3[1], "外資買賣超", f_str, clr=f_clr)
+    m_card(col_r3[2], "投信買賣超", t_str, clr=t_clr)
+    m_card(col_r3[3], "自營商買賣超", d_str, clr=d_clr)
+
+    # 📏 歷史紀錄 (版面平分設計)
     st.markdown("---")
-    h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
-    with st.expander(f"📜 歷史處置紀錄分析 (共 {len(h_df)} 次)"):
-        if not h_df.empty:
-            st.table(h_df[['period_start', 'period_end', 'measure']].rename(columns={'period_start':'起始', 'period_end':'結束', 'measure':'措施'}))
-        else: st.write("無歷史處置紀錄")
+    h_col1, h_col2 = st.columns(2)
+    with h_col1:
+        h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
+        with st.expander(f"📜 歷史處置紀錄分析 (共 {len(h_df)} 次)"):
+            if not h_df.empty:
+                st.table(h_df[['period_start', 'period_end', 'measure']].rename(columns={'period_start':'起始', 'period_end':'結束', 'measure':'措施'}))
+            else: st.write("無歷史處置紀錄")
 
 else:
     st.error("查無此標的或歷史報價抓取失敗。")
