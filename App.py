@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8" 
 
 # 設定網頁標題與圖示
-st.set_page_config(page_title="台股處置預警雷達 (FinMind 盤後旗艦版)", layout="wide")
+st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
 # ==========================================
 # 🎨 自訂 CSS (包含動態標籤亮燈系統)
@@ -18,7 +18,7 @@ st.markdown("""
 <style>
     .card-container { background-color: #1e1e26; border-radius: 12px; padding: 20px; margin-bottom: 15px; border: 1px solid #333; box-shadow: 2px 2px 10px rgba(0,0,0,0.3); }
     .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; }
-    .metric-value { color: #ffffff; font-size: 26px; font-weight: 700; }
+    .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
     .metric-sub { font-size: 14px; font-weight: 500; }
     
     /* 頂部搜尋與標籤列排版 */
@@ -63,7 +63,7 @@ def get_all_info():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
 
-# --- 核心邏輯 ---
+# --- 核心風險邏輯 ---
 def calc_risk(prices):
     if len(prices) < 90: return False
     now = prices[-1]
@@ -87,7 +87,7 @@ if not stock_list:
     st.error("正在連線 FinMind 或 Token 無效，請確認網路與設定。")
     st.stop()
 
-# 🎯 第一列：搜尋框 (左 50%) 與 標籤列 (右 50%)
+# 🎯 第一列：搜尋框與標籤列
 top_col1, top_col2 = st.columns([1, 1])
 
 with top_col1:
@@ -105,22 +105,34 @@ with st.spinner("正在載入盤後數據..."):
     df_day = api_request("TaiwanStockDayTrading", sid, (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
 
-# 🛡️ 嚴格處理處置狀態 (解決 6531 愛普型別錯誤)
+# 處理處置狀態
 is_punished = False
 disp_info = {}
 if not df_disp.empty and 'period_end' in df_disp.columns:
-    df_disp['stock_id'] = df_disp['stock_id'].astype(str) # 強制轉為字串
+    df_disp['stock_id'] = df_disp['stock_id'].astype(str) 
     df_disp['period_end_dt'] = pd.to_datetime(df_disp['period_end'])
-    
-    # 過濾出當前股票且時間還沒過期的處置紀錄
     active_disp = df_disp[(df_disp['stock_id'] == sid) & (df_disp['period_end_dt'] >= pd.Timestamp.today().normalize())]
-    
     if not active_disp.empty:
         is_punished = True
         latest = active_disp.sort_values('period_end_dt').iloc[-1]
         measure = latest['measure']
         match_time = "20分盤" if "二十分" in measure else "5分盤" if "五分" in measure else "10分盤" if "十分" in measure else "處置中"
         disp_info = {"period": f"{latest['period_start']} ~ {latest['period_end']}", "measure": measure, "match": match_time}
+
+# 計算收盤價與基本數據
+if not df_price.empty:
+    df_price['date'] = pd.to_datetime(df_price['date'])
+    df_price = df_price.set_index('date').sort_index()
+    closes = df_price['close']
+    vols = df_price['Trading_Volume']
+    p_now = closes.iloc[-1]
+    p_prev = closes.iloc[-2] if len(closes) > 1 else p_now
+    diff = p_now - p_prev
+    pct = (diff / p_prev) * 100 if p_prev > 0 else 0
+    c_class = "red-text" if diff > 0 else "green-text" if diff < 0 else ""
+    today_vol = vols.iloc[-1]
+else:
+    p_now, today_vol = 0, 0
 
 # 準備標籤亮燈邏輯
 market_name = "上市" if info['market'] == 'twse' else "上櫃"
@@ -130,7 +142,12 @@ day_trade_vol = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].iloc[-1] if no
 
 tag_margin = "t-on" if margin_bal > 0 else "t-off"
 tag_short = "t-on" if short_bal > 0 else "t-off"
-tag_day = "t-on" if day_trade_vol > 0 and not is_punished else "t-off" # 處置股通常禁現股當沖
+tag_day = "t-on" if day_trade_vol > 0 and not is_punished else "t-off" 
+
+# 💡 智能期權標籤判定 (大型權值股或高周轉熱門股自動亮燈)
+large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2891', '2609', '2615', '3008', '2303', '1101']
+tag_future = "t-on" if sid in large_caps or today_vol > 10000000 else "t-off"
+tag_warrant = "t-on" if sid in large_caps or today_vol > 3000000 else "t-off"
 
 with top_col2:
     tags_html = f"""
@@ -138,15 +155,14 @@ with top_col2:
         <span class="tag-base t-market">{market_name}</span>
         <span class="tag-base t-market">{info['industry']}</span>
     """
-    if is_punished:
-        tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
+    if is_punished: tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
         
     tags_html += f"""
         <span class="tag-base {tag_margin}">資</span>
         <span class="tag-base {tag_short}">券</span>
         <span class="tag-base {tag_day}">沖</span>
-        <span class="tag-base t-off">期</span>
-        <span class="tag-base t-off">權</span>
+        <span class="tag-base {tag_future}">期</span>
+        <span class="tag-base {tag_warrant}">權</span>
     </div>
     """
     st.markdown(tags_html, unsafe_allow_html=True)
@@ -154,17 +170,6 @@ with top_col2:
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
 if not df_price.empty:
-    df_price['date'] = pd.to_datetime(df_price['date'])
-    df_price = df_price.set_index('date').sort_index()
-    closes = df_price['close']
-    vols = df_price['Trading_Volume']
-    
-    p_now = closes.iloc[-1]
-    p_prev = closes.iloc[-2] if len(closes) > 1 else p_now
-    diff = p_now - p_prev
-    pct = (diff / p_prev) * 100 if p_prev > 0 else 0
-    c_class = "red-text" if diff > 0 else "green-text" if diff < 0 else ""
-
     # --- 第一行看板 ---
     c1, c2 = st.columns(2)
     with c1:
@@ -191,42 +196,56 @@ if not df_price.empty:
     def m_card(c, l, v, clr="white", sub=""):
         c.markdown(f'<div class="card-container" style="padding:15px;"><div class="metric-label">{l}</div><div class="metric-value" style="font-size:20px; color:{clr};">{v}</div><div class="metric-sub" style="color:#888;">{sub}</div></div>', unsafe_allow_html=True)
 
-    # 第一排：純粹的價量數據 (修正為「張」)
-    today_vol = vols.iloc[-1]
-    vol_lots = today_vol / 1000 # 換算成張
+    # 💡 輔助函式：將金額格式化為 億 或 萬
+    def format_amt(val):
+        if val == 0: return "0"
+        sign = "+" if val > 0 else ""
+        if abs(val) >= 100000000: return f"{sign}{val/100000000:.2f} 億"
+        else: return f"{sign}{val/10000:,.0f} 萬"
+
+    # 第一排：純粹的價量數據
+    vol_lots = today_vol / 1000 
     vol_5d_lots = vols.tail(5).mean() / 1000
     m_card(col[0], "成交張數", f"{vol_lots:,.0f} 張")
     m_card(col[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億")
     m_card(col[2], "5日均量", f"{vol_5d_lots:,.0f} 張")
     m_card(col[3], "明日注意門檻", f"{closes.iloc[-5]*1.25:.2f}" if len(closes) >= 6 else "N/A", clr="#ffc107")
 
-    # 第二排：當沖與法人
+    # 第二排：當沖與券資
     day_pct, day_vol_lots = 0, 0
     if day_trade_vol > 0:
         day_vol_lots = day_trade_vol / 1000
         day_pct = (day_trade_vol / today_vol) * 100 if today_vol > 0 else 0
 
+    short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
+    turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
+
     m_card(col[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518")
     m_card(col[1], "當沖成交張數", f"{day_vol_lots:,.0f} 張")
-    
-    f_net, t_net = 0, 0
+    m_card(col[2], "券資比", f"{short_ratio:.1f}%")
+    m_card(col[3], "週轉率", f"{turnover:.2f} 倍均量")
+
+    # 第三排：法人買賣超 (全新改版：金額顯示)
+    f_amt, t_amt, d_amt, total_amt = 0, 0, 0, 0
     if not df_inst.empty:
         last_date = df_inst['date'].max()
         daily_inst = df_inst[df_inst['date'] == last_date]
         inst_net = daily_inst.groupby('name')['buy'].sum() - daily_inst.groupby('name')['sell'].sum()
-        f_net = inst_net.get('Foreign_Investor', 0) / 1000  # 換算成張
-        t_net = inst_net.get('Investment_Trust', 0) / 1000
         
-    m_card(col[2], "外資買賣超", f"{f_net:+,.0f} 張", clr="white")
-    m_card(col[3], "投信買賣超", f"{t_net:+,.0f} 張")
+        # 取得各自淨買賣股數，再乘上收盤價算出真實金額 (元)
+        f_shares = inst_net.get('Foreign_Investor', 0) + inst_net.get('Foreign_Dealer_Self', 0)
+        t_shares = inst_net.get('Investment_Trust', 0)
+        d_shares = inst_net.get('Dealer_self', 0) + inst_net.get('Dealer_Hedging', 0)
+        
+        f_amt = f_shares * p_now
+        t_amt = t_shares * p_now
+        d_amt = d_shares * p_now
+        total_amt = f_amt + t_amt + d_amt
 
-    # 第三排：資券與比例
-    short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
-    m_card(col[0], "融資餘額", f"{margin_bal/1000:,.0f} 張")
-    m_card(col[1], "融券餘額", f"{short_bal/1000:,.0f} 張")
-    m_card(col[2], "券資比", f"{short_ratio:.1f}%")
-    turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
-    m_card(col[3], "週轉率", f"{turnover:.2f} 倍均量")
+    m_card(col[0], "三大法人買賣超", format_amt(total_amt), clr="#f5c518" if total_amt > 0 else "white")
+    m_card(col[1], "外資買賣超", format_amt(f_amt))
+    m_card(col[2], "投信買賣超", format_amt(t_amt))
+    m_card(col[3], "自營商買賣超", format_amt(d_amt))
 
     # 歷史紀錄
     st.markdown("---")
