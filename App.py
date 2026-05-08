@@ -115,7 +115,6 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
         is_punished = True
         latest = active_disp.sort_values('period_end_dt').iloc[-1]
         measure = latest['measure']
-        # 判斷盤別
         match_time = "60分盤" if "六十分" in measure else "20分盤" if "二十分" in measure else "5分盤" if "五分" in measure else "10分盤" if "十分" in measure else "處置中"
         disp_info = {"period": f"{latest['period_start']} ~ {latest['period_end']}", "measure": measure, "match": match_time}
 
@@ -149,45 +148,50 @@ large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2
 tag_future = "t-on" if sid in large_caps or today_vol > 10000000 else "t-off"
 tag_warrant = "t-on" if sid in large_caps or today_vol > 3000000 else "t-off"
 
+# 🚀 修正：消除縮排陷阱，保證 HTML 安全渲染
 with top_col2:
-    tags_html = f"""
-    <div class="tags-container">
-        <span class="tag-base t-market">{market_name}</span>
-        <span class="tag-base t-market">{info['industry']}</span>
-    """
-    # 只有處置時才會顯示處置盤別標籤
+    tags_html = '<div class="tags-container">'
+    tags_html += f'<span class="tag-base t-market">{market_name}</span>'
+    tags_html += f'<span class="tag-base t-market">{info["industry"]}</span>'
     if is_punished: 
         tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
         
-    tags_html += f"""
-        <span class="tag-base {tag_margin}">資</span>
-        <span class="tag-base {tag_short}">券</span>
-        <span class="tag-base {tag_day}">沖</span>
-        <span class="tag-base {tag_future}">期</span>
-        <span class="tag-base {tag_warrant}">權</span>
-    </div>
-    """
+    tags_html += f'<span class="tag-base {tag_margin}">資</span>'
+    tags_html += f'<span class="tag-base {tag_short}">券</span>'
+    tags_html += f'<span class="tag-base {tag_day}">沖</span>'
+    tags_html += f'<span class="tag-base {tag_future}">期</span>'
+    tags_html += f'<span class="tag-base {tag_warrant}">權</span>'
+    tags_html += '</div>'
+    
     st.markdown(tags_html, unsafe_allow_html=True)
 
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
 if not df_price.empty:
-    # --- 第一行看板 (修復排版跑版問題，改用純 HTML 輸出) ---
+    # --- 第一行看板 ---
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown(f'<div class="card-container"><div class="metric-label">收盤價</div><div class="metric-value {c_class}">{p_now:.2f}</div><div class="metric-sub {c_class}">{"▲" if diff>0 else "▼" if diff<0 else ""} {abs(diff):.2f} ({pct:+.2f}%)</div></div>', unsafe_allow_html=True)
+        # 消除縮排陷阱
+        p_html = (
+            '<div class="card-container">'
+            '<div class="metric-label">收盤價</div>'
+            f'<div class="metric-value {c_class}">{p_now:.2f}</div>'
+            f'<div class="metric-sub {c_class}">{"▲" if diff>0 else "▼" if diff<0 else ""} {abs(diff):.2f} ({pct:+.2f}%)</div>'
+            '</div>'
+        )
+        st.markdown(p_html, unsafe_allow_html=True)
+        
     with c2:
         if is_punished:
-            html_content = f"""
-            <div class="card-container">
-                <div class="metric-label">風險預測</div>
-                <div class="metric-value" style="color:#ffc107;">🚨 已在處置中</div>
-                <div class="metric-sub">處置期間：{disp_info["period"]}</div>
-                <div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">
-                    <div style="width:100%; background-color:#ffc107; height:6px; border-radius:5px;"></div>
-                </div>
-            </div>
-            """
+            html_content = (
+                '<div class="card-container">'
+                '<div class="metric-label">風險預測</div>'
+                '<div class="metric-value" style="color:#ffc107;">🚨 已在處置中</div>'
+                f'<div class="metric-sub">處置期間：{disp_info["period"]}</div>'
+                '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
+                '<div style="width:100%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
+                '</div></div>'
+            )
             st.markdown(html_content, unsafe_allow_html=True)
         else:
             streak = 0
@@ -198,35 +202,41 @@ if not df_price.empty:
             d, p = simulate(list(closes), streak)
             if d:
                 risk_width = max(0, min(100, 100 - (d * 10)))
-                html_content = f"""
-                <div class="card-container">
-                    <div class="metric-label">風險預測</div>
-                    <div class="metric-value" style="color:#ffc107;">🔥 T+{d} 可能處置</div>
-                    <div class="metric-sub">預估門檻價：{p:.2f}</div>
-                    <div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">
-                        <div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>
-                    </div>
-                </div>
-                """
+                html_content = (
+                    '<div class="card-container">'
+                    '<div class="metric-label">風險預測</div>'
+                    f'<div class="metric-value" style="color:#ffc107;">🔥 T+{d} 可能處置</div>'
+                    f'<div class="metric-sub">預估門檻價：{p:.2f}</div>'
+                    '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
+                    f'<div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
+                    '</div></div>'
+                )
                 st.markdown(html_content, unsafe_allow_html=True)
             else:
-                html_content = """
-                <div class="card-container">
-                    <div class="metric-label">風險預測</div>
-                    <div class="metric-value" style="color:#00ff00;">✅ 目前風險等級：低</div>
-                    <div class="metric-sub" style="color:transparent;">_</div>
-                    <div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">
-                        <div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>
-                    </div>
-                </div>
-                """
+                html_content = (
+                    '<div class="card-container">'
+                    '<div class="metric-label">風險分析</div>'
+                    '<div class="metric-value" style="color:#00ff00;">✅ 目前風險等級：低</div>'
+                    '<div class="metric-sub" style="color:transparent;">_</div>'
+                    '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
+                    '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
+                    '</div></div>'
+                )
                 st.markdown(html_content, unsafe_allow_html=True)
 
     # --- 九宮格數據區 ---
     def m_card(c, l, v, clr="white", sub=""):
-        c.markdown(f'<div class="card-container" style="padding:15px;"><div class="metric-label">{l}</div><div class="metric-value" style="font-size:22px; color:{clr};">{v}</div><div class="metric-sub" style="color:#888;">{sub}</div></div>', unsafe_allow_html=True)
+        # 消除縮排陷阱
+        card_html = (
+            '<div class="card-container" style="padding:15px;">'
+            f'<div class="metric-label">{l}</div>'
+            f'<div class="metric-value" style="font-size:22px; color:{clr};">{v}</div>'
+            f'<div class="metric-sub" style="color:#888;">{sub}</div>'
+            '</div>'
+        )
+        c.markdown(card_html, unsafe_allow_html=True)
 
-    # 📏 第 1 列：成交張數、成交值、週轉率、券資比
+    # 📏 第 1 列：成交張數、成交金額、週轉率、券資比
     col_r1 = st.columns(4)
     vol_lots = today_vol / 1000 
     turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
