@@ -95,14 +95,15 @@ with top_col1:
 info = stock_list[search]
 sid = info['id']
 start_str = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
-safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") # 拉長籌碼抓取時間防止長假
+safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
 # 一次性抓取所有必要資料
 with st.spinner("正在載入盤後數據..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
-    df_day = api_request("TaiwanStockDayTrading", sid, safe_start_str)
+    # 將當沖抓取時間拉長，確保遇到 API 延遲時仍有歷史數據可供判定
+    df_day = api_request("TaiwanStockDayTrading", sid, start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
 
 # 處理處置狀態
@@ -135,15 +136,19 @@ if not df_price.empty:
 else:
     p_now, today_vol, price_date_str = 0, 0, ""
 
-# 🛡️ 智能標籤體質判定 (掃描過去20天確保不漏接)
+# 🛡️ 智能標籤體質判定：導入證交所法規邏輯
 market_name = "上市" if info['market'] == 'twse' else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
-can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
+history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
+
+# 法規邏輯：得為融資融券者，即具備當沖資格。
+is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
 tag_short = "t-on" if can_short else "t-off"
-tag_day = "t-on" if can_day and not is_punished else "t-off" # 處置期間依法禁止當沖，標籤自動熄滅
+# 處置股依法定規矩暫停當沖，立刻熄燈
+tag_day = "t-on" if is_day_trade_eligible and not is_punished else "t-off" 
 
 # 💡 智能期權標籤判定
 large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2891', '2609', '2615', '3008', '2303', '1101']
