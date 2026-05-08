@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 # ==========================================
 # 🔑 100% FinMind VIP Token 設定
 # ==========================================
-FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8" 
+FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8"
 
 # 設定網頁標題與圖示
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
@@ -19,7 +19,7 @@ st.markdown("""
     .card-container { background-color: #1e1e26; border-radius: 12px; padding: 20px; margin-bottom: 15px; border: 1px solid #333; box-shadow: 2px 2px 10px rgba(0,0,0,0.3); }
     .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; }
     .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
-    .metric-sub { font-size: 14px; font-weight: 500; }
+    .metric-sub { font-size: 14px; font-weight: 500; margin-top: 5px;}
     
     /* 頂部標籤列排版 */
     .tags-container { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; height: 100%; padding-bottom: 5px; }
@@ -115,7 +115,8 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
         is_punished = True
         latest = active_disp.sort_values('period_end_dt').iloc[-1]
         measure = latest['measure']
-        match_time = "20分盤" if "二十分" in measure else "5分盤" if "五分" in measure else "10分盤" if "十分" in measure else "處置中"
+        # 判斷盤別
+        match_time = "60分盤" if "六十分" in measure else "20分盤" if "二十分" in measure else "5分盤" if "五分" in measure else "10分盤" if "十分" in measure else "處置中"
         disp_info = {"period": f"{latest['period_start']} ~ {latest['period_end']}", "measure": measure, "match": match_time}
 
 # 計算收盤價與基本數據
@@ -143,7 +144,7 @@ tag_margin = "t-on" if margin_bal > 0 else "t-off"
 tag_short = "t-on" if short_bal > 0 else "t-off"
 tag_day = "t-on" if day_trade_vol > 0 and not is_punished else "t-off" 
 
-# 💡 智能期權標籤判定：大型權值股或高周轉熱門股自動亮燈
+# 💡 智能期權標籤判定
 large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2891', '2609', '2615', '3008', '2303', '1101']
 tag_future = "t-on" if sid in large_caps or today_vol > 10000000 else "t-off"
 tag_warrant = "t-on" if sid in large_caps or today_vol > 3000000 else "t-off"
@@ -154,7 +155,9 @@ with top_col2:
         <span class="tag-base t-market">{market_name}</span>
         <span class="tag-base t-market">{info['industry']}</span>
     """
-    if is_punished: tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
+    # 只有處置時才會顯示處置盤別標籤
+    if is_punished: 
+        tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
         
     tags_html += f"""
         <span class="tag-base {tag_margin}">資</span>
@@ -169,14 +172,23 @@ with top_col2:
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
 if not df_price.empty:
-    # --- 第一行看板 ---
+    # --- 第一行看板 (修復排版跑版問題，改用純 HTML 輸出) ---
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f'<div class="card-container"><div class="metric-label">收盤價</div><div class="metric-value {c_class}">{p_now:.2f}</div><div class="metric-sub {c_class}">{"▲" if diff>0 else "▼" if diff<0 else ""} {abs(diff):.2f} ({pct:+.2f}%)</div></div>', unsafe_allow_html=True)
     with c2:
-        st.markdown('<div class="card-container">', unsafe_allow_html=True)
         if is_punished:
-            st.markdown(f'<div class="metric-label">風險預測</div><div class="metric-value" style="color:#ffc107;">🚨 已在處置中</div><div class="metric-sub">處置期間：{disp_info["period"]}</div>', unsafe_allow_html=True)
+            html_content = f"""
+            <div class="card-container">
+                <div class="metric-label">風險預測</div>
+                <div class="metric-value" style="color:#ffc107;">🚨 已在處置中</div>
+                <div class="metric-sub">處置期間：{disp_info["period"]}</div>
+                <div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">
+                    <div style="width:100%; background-color:#ffc107; height:6px; border-radius:5px;"></div>
+                </div>
+            </div>
+            """
+            st.markdown(html_content, unsafe_allow_html=True)
         else:
             streak = 0
             tmp = list(closes)
@@ -185,37 +197,59 @@ if not df_price.empty:
                 else: break
             d, p = simulate(list(closes), streak)
             if d:
-                st.markdown(f'<div class="metric-label">風險預測</div><div class="metric-value" style="color:#ffc107;">🔥 T+{d} 可能處置</div><div class="metric-sub">預估門檻價：{p:.2f}</div>', unsafe_allow_html=True)
+                risk_width = max(0, min(100, 100 - (d * 10)))
+                html_content = f"""
+                <div class="card-container">
+                    <div class="metric-label">風險預測</div>
+                    <div class="metric-value" style="color:#ffc107;">🔥 T+{d} 可能處置</div>
+                    <div class="metric-sub">預估門檻價：{p:.2f}</div>
+                    <div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">
+                        <div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>
+                    </div>
+                </div>
+                """
+                st.markdown(html_content, unsafe_allow_html=True)
             else:
-                st.markdown('<div class="metric-label">風險分析</div><div class="metric-value" style="color:#00ff00;">✅ 目前風險等級：低</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+                html_content = """
+                <div class="card-container">
+                    <div class="metric-label">風險預測</div>
+                    <div class="metric-value" style="color:#00ff00;">✅ 目前風險等級：低</div>
+                    <div class="metric-sub" style="color:transparent;">_</div>
+                    <div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">
+                        <div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>
+                    </div>
+                </div>
+                """
+                st.markdown(html_content, unsafe_allow_html=True)
 
     # --- 九宮格數據區 ---
     def m_card(c, l, v, clr="white", sub=""):
         c.markdown(f'<div class="card-container" style="padding:15px;"><div class="metric-label">{l}</div><div class="metric-value" style="font-size:22px; color:{clr};">{v}</div><div class="metric-sub" style="color:#888;">{sub}</div></div>', unsafe_allow_html=True)
 
-    # 第一排：純粹的價量數據
+    # 📏 第 1 列：成交張數、成交值、週轉率、券資比
     col_r1 = st.columns(4)
     vol_lots = today_vol / 1000 
-    vol_5d_lots = vols.tail(5).mean() / 1000
+    turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
+    short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
+
     m_card(col_r1[0], "成交張數", f"{vol_lots:,.0f} 張")
     m_card(col_r1[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億")
-    m_card(col_r1[2], "5日均量", f"{vol_5d_lots:,.0f} 張")
-    m_card(col_r1[3], "明日注意門檻", f"{closes.iloc[-5]*1.25:.2f}" if len(closes) >= 6 else "N/A", clr="#ffc107")
+    m_card(col_r1[2], "週轉率", f"{turnover:.2f} 倍均量")
+    m_card(col_r1[3], "券資比", f"{short_ratio:.1f}%")
 
-    # 第二排：當沖與週轉
-    col_r2 = st.columns(3)
+    # 📏 第 2 列：當沖率、當沖獲利、當沖獲利率、當沖成交張數
+    col_r2 = st.columns(4)
     day_pct, day_vol_lots = 0, 0
     if day_trade_vol > 0:
         day_vol_lots = day_trade_vol / 1000
         day_pct = (day_trade_vol / today_vol) * 100 if today_vol > 0 else 0
-    turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
 
     m_card(col_r2[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518")
-    m_card(col_r2[1], "當沖成交張數", f"{day_vol_lots:,.0f} 張")
-    m_card(col_r2[2], "週轉率", f"{turnover:.2f} 倍均量")
+    m_card(col_r2[1], "當沖獲利", "N/A", clr="#555")       # 官方 API 無提供此項
+    m_card(col_r2[2], "當沖獲利率", "N/A", clr="#555")     # 官方 API 無提供此項
+    m_card(col_r2[3], "當沖成交張數", f"{day_vol_lots:,.0f} 張")
 
-    # 第三排：法人買賣超 (金額 + 智慧紅綠燈)
+    # 📏 第 3 列：法人買賣超 (金額化 + 智慧紅綠燈)
     col_r3 = st.columns(4)
     f_amt, t_amt, d_amt, total_amt = 0, 0, 0, 0
     if not df_inst.empty:
@@ -232,7 +266,6 @@ if not df_price.empty:
         d_amt = d_shares * p_now
         total_amt = f_amt + t_amt + d_amt
 
-    # 💡 買賣超金額格式化器 (附加顏色)
     def format_inst_amt(val):
         if val == 0: return "0", "white"
         sign = "+" if val > 0 else ""
@@ -247,10 +280,10 @@ if not df_price.empty:
     t_str, t_clr = format_inst_amt(t_amt)
     d_str, d_clr = format_inst_amt(d_amt)
 
-    m_card(col_r3[0], "三大法人買賣超", total_str, clr=total_clr)
-    m_card(col_r3[1], "外資買賣超", f_str, clr=f_clr)
-    m_card(col_r3[2], "投信買賣超", t_str, clr=t_clr)
-    m_card(col_r3[3], "自營商買賣超", d_str, clr=d_clr)
+    m_card(col_r3[0], "三大法人淨買賣金額", total_str, clr=total_clr)
+    m_card(col_r3[1], "外資買賣金額", f_str, clr=f_clr)
+    m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr)
+    m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr)
 
     # 📏 歷史紀錄 (版面平分設計)
     st.markdown("---")
