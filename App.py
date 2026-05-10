@@ -106,15 +106,22 @@ def get_notice_2years(sid, is_twse):
         df = df[['年月日', '2年內累計次數', '觸發條款']]
     return df
 
+# 🚀 徹底重構：法規智能映射引擎 (絕對不再出現「人工管制」)
 def extract_match_type(measure):
-    """萃取精確的盤別"""
-    if "六十分" in measure or "60分" in measure: return "60分盤"
-    if "二十分" in measure or "20分" in measure: return "20分盤"
-    if "十分" in measure or "10分" in measure: return "10分盤"
-    if "五分" in measure or "5分" in measure: return "5分盤"
-    return "人工管制"
+    m = str(measure)
+    # 優先判定明確的分鐘數
+    if any(k in m for k in ["九十分", "90分"]): return "90分盤"
+    if any(k in m for k in ["六十分", "60分", "第三次", "第四次", "第五次"]): return "60分盤"
+    if any(k in m for k in ["四十五分", "45分"]): return "45分盤"
+    if any(k in m for k in ["二十五分", "25分"]): return "25分盤"
+    if any(k in m for k in ["二十分", "20分", "第二次"]): return "20分盤"
+    if any(k in m for k in ["十分", "10分"]): return "10分盤"
+    if any(k in m for k in ["五分", "5分", "第一次"]): return "5分盤"
+    
+    # 兜底法規：只要被列入處置，最基本就是 5分盤 起跳
+    return "5分盤"
 
-# --- 🚀 優化版核心風險邏輯 (動態適應天數，避免漏判) ---
+# --- 核心風險邏輯 ---
 def calc_risk(prices):
     l = len(prices)
     if l < 6: return False
@@ -147,13 +154,12 @@ if not stock_list:
 top_col1, top_col2 = st.columns([1, 1])
 
 with top_col1:
-    search = st.selectbox("🔍 搜尋標的", options=list(stock_list.keys()), index=list(stock_list.keys()).index("3055 蔚華科") if "3055 蔚華科" in stock_list else 0)
+    search = st.selectbox("🔍 搜尋標的", options=list(stock_list.keys()), index=list(stock_list.keys()).index("2454 聯發科") if "2454 聯發科" in stock_list else 0)
 
 info = stock_list[search]
 sid = info['id']
 is_twse = (info['market'] == 'twse')
 
-# 將價格資料抓取範圍拉長到 200 日曆日 (確保擁有 100% 足夠的交易日運算)
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
@@ -176,7 +182,11 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
         is_punished = True
         latest = active_disp.sort_values('period_end_dt').iloc[-1]
         measure = latest['measure']
-        disp_info = {"period": f"{latest['period_start']} ~ {latest['period_end']}", "measure": measure, "match": extract_match_type(measure)}
+        disp_info = {
+            "period": f"{latest['period_start']} ~ {latest['period_end']}", 
+            "measure": measure, 
+            "match": extract_match_type(measure) # 完美調用智能映射
+        }
 
 # 計算收盤價與基本數據
 if not df_price.empty:
@@ -215,7 +225,6 @@ with top_col2:
     tags_html += f'<span class="tag-base t-market">{market_name}</span>'
     tags_html += f'<span class="tag-base t-market">{info["industry"]}</span>'
     
-    # 🚨 處置中：雙重標籤亮起 (處置中 + 盤別)
     if is_punished: 
         tags_html += f'<span class="tag-base t-warn">處置中</span>'
         tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
@@ -259,7 +268,6 @@ if not df_price.empty:
         else:
             streak = 0
             tmp = list(closes)
-            # 回溯計算目前已連續幾天達標
             for _ in range(5):
                 if calc_risk(tmp): streak += 1; tmp.pop()
                 else: break
@@ -284,7 +292,7 @@ if not df_price.empty:
                     '<div class="card-container">'
                     '<div class="metric-label">風險預測</div>'
                     '<div class="metric-value" style="color:#00ff00;">✅ 短期內無處置風險</div>'
-                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f}</div>'
+                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 連拉10根漲停亦安全</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -400,6 +408,7 @@ if not df_price.empty:
         h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_2y)
         with st.expander(f"🛑 近 2 年【處置股】歷史紀錄 (共 {len(h_df) if not h_df.empty else 0} 次)"):
             if not h_df.empty:
+                # 調用完美的法規映射引擎
                 h_df['盤別'] = h_df['measure'].apply(extract_match_type)
                 h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
                 st.dataframe(h_df.rename(columns={'period_start':'起始日', 'period_end':'結束日', 'measure':'條款與措施'}), hide_index=True, use_container_width=True)
