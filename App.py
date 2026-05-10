@@ -44,20 +44,20 @@ st.markdown("""
 # ==========================================
 def fetch_with_proxy(url):
     """突破政府 API 阻擋的代理伺服器"""
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        r = requests.get(url, headers=headers, timeout=3)
+        r = requests.get(url, headers=headers, timeout=2)
+        if r.status_code == 200: 
+            res = r.json()
+            if "stat" in res and res["stat"] != "OK": return None
+            return res
+    except: pass
+    
+    try:
+        proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}"
+        r = requests.get(proxy_url, headers=headers, timeout=3)
         if r.status_code == 200: return r.json()
     except: pass
-    proxies = [
-        f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}",
-        f"https://corsproxy.io/?{urllib.parse.quote(url)}"
-    ]
-    for proxy in proxies:
-        try:
-            r = requests.get(proxy, headers=headers, timeout=5)
-            if r.status_code == 200: return r.json()
-        except: pass
     return None
 
 @st.cache_data(ttl=3600)
@@ -84,16 +84,15 @@ def get_all_info():
 
 @st.cache_data(ttl=3600)
 def get_notice_2years(sid, is_twse):
-    """突破 API 限制：精準抓取上市與上櫃過去 2 年注意股歷史"""
+    """🚀 終極突破版：完全切碎查詢區間，保證繞過官方 31 天限制"""
     records = []
     end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=730)
     
     if is_twse:
-        # 上市：避免發送過多請求被鎖 IP，改為 1年 1次請求，共查 2年
-        for i in range(2):
-            e_dt = end_dt - timedelta(days=i*365)
-            s_dt = e_dt - timedelta(days=364)
+        # 上市：切成 25 個 30天的區塊
+        for i in range(25):
+            e_dt = end_dt - timedelta(days=i*30)
+            s_dt = e_dt - timedelta(days=29)
             url = f"https://www.twse.com.tw/announcement/notice?response=json&startDate={s_dt.strftime('%Y%m%d')}&endDate={e_dt.strftime('%Y%m%d')}&stockNo={sid}"
             data = fetch_with_proxy(url)
             if data and 'data' in data:
@@ -103,25 +102,29 @@ def get_notice_2years(sid, is_twse):
                         ad_date = datetime(int(y)+1911, int(m), int(d))
                         records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
                     except: pass
-            time.sleep(0.1)
+            time.sleep(0.05)
     else:
-        # 上櫃：破解櫃買中心 API 格式
-        start_tw = f"{start_dt.year - 1911:03d}/{start_dt.month:02d}/{start_dt.day:02d}"
-        end_tw = f"{end_dt.year - 1911:03d}/{end_dt.month:02d}/{end_dt.day:02d}"
-        url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={start_tw}&ed={end_tw}&s={sid}&o=json"
-        data = fetch_with_proxy(url)
-        if data and 'aaData' in data:
-            for item in data['aaData']:
-                try:
-                    y, m, d = item[0].split('/')
-                    ad_date = datetime(int(y)+1911, int(m), int(d))
-                    records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
-                except: pass
+        # 上櫃：同樣切成 25 個區塊，確保不出錯
+        for i in range(25):
+            e_dt = end_dt - timedelta(days=i*30)
+            s_dt = e_dt - timedelta(days=29)
+            start_tw = f"{s_dt.year - 1911:03d}/{s_dt.month:02d}/{s_dt.day:02d}"
+            end_tw = f"{e_dt.year - 1911:03d}/{e_dt.month:02d}/{e_dt.day:02d}"
+            url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={start_tw}&ed={end_tw}&s={sid}&o=json"
+            data = fetch_with_proxy(url)
+            if data and 'aaData' in data:
+                for item in data['aaData']:
+                    try:
+                        y, m, d = item[0].split('/')
+                        ad_date = datetime(int(y)+1911, int(m), int(d))
+                        records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
+                    except: pass
+            time.sleep(0.05)
 
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.drop_duplicates(subset=['年月日']).sort_values('date', ascending=True).reset_index(drop=True)
-        # 精準回測：計算近 20 個交易日(法規換算約 30 個日曆日)的累積次數
+        # 🧠 精準計算：近 20 個交易日 (法規換算約 30 個日曆日) 的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -137,7 +140,6 @@ def get_notice_2years(sid, is_twse):
 # 🚀 絕對防呆機制：法規智能映射引擎 (徹底消滅「人工管制」)
 def extract_match_type(measure):
     m = str(measure)
-    # 1. 優先精確匹配法規的分鐘數
     if any(k in m for k in ["九十分", "90分"]): return "90分盤"
     if any(k in m for k in ["六十分", "60分"]): return "60分盤"
     if any(k in m for k in ["四十五分", "45分"]): return "45分盤"
@@ -146,15 +148,14 @@ def extract_match_type(measure):
     if any(k in m for k in ["十分", "10分"]): return "10分盤"
     if any(k in m for k in ["五分", "5分"]): return "5分盤"
     
-    # 2. 當資料庫僅給予「第幾次」時，啟動法規強制層級換算
+    # 兜底法規：只要資料庫寫出次數，強制作對應
     if "第五次" in m: return "90分盤"
     if "第四次" in m: return "60分盤"
     if "第三次" in m: return "45分盤"
     if "第二次" in m: return "20分盤"
     if "第一次" in m: return "5分盤"
     
-    # 3. 最強兜底：只要列為處置股，最基礎起跳就是 5分盤
-    return "5分盤"
+    return "5分盤" # 終極兜底
 
 # --- 核心風險邏輯 ---
 def calc_risk(prices):
@@ -220,7 +221,7 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
         disp_info = {
             "period": f"{latest['period_start']} ~ {latest['period_end']}", 
             "measure": measure, 
-            "match": extract_match_type(measure) # 完美調用智能映射
+            "match": extract_match_type(measure) 
         }
 
 # 計算收盤價與基本數據
