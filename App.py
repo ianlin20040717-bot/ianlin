@@ -62,16 +62,24 @@ def get_all_info():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
 
-# --- 核心風險邏輯 ---
+# --- 🚀 優化版核心風險邏輯 (動態適應天數，避免漏判) ---
 def calc_risk(prices):
-    if len(prices) < 90: return False
+    l = len(prices)
+    if l < 6: return False
     now = prices[-1]
-    return (abs(now / prices[-6] - 1) > 0.25) or (now / prices[-30] - 1 > 1.0) or (now / prices[-60] - 1 > 1.3)
+    
+    # 根據法規：6日漲幅25%、30日漲幅100%、60日130%、90日160%
+    c1 = (abs(now / prices[-6] - 1) > 0.25) if l >= 6 else False
+    c2 = (now / prices[-30] - 1 > 1.0) if l >= 30 else False
+    c3 = (now / prices[-60] - 1 > 1.3) if l >= 60 else False
+    c4 = (now / prices[-90] - 1 > 1.6) if l >= 90 else False
+    
+    return c1 or c2 or c3 or c4
 
 def simulate(prices, streak):
     sim = list(prices)
     for day in range(1, 11):
-        next_p = sim[-1] * 1.099
+        next_p = sim[-1] * 1.099 # 模擬每日漲停
         sim.append(next_p)
         if calc_risk(sim): streak += 1
         else: streak = 0
@@ -94,18 +102,20 @@ with top_col1:
 
 info = stock_list[search]
 sid = info['id']
-start_str = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
+
+# 將價格資料抓取範圍拉長到 200 日曆日 (確保擁有至少 90 個交易日)
+start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
 # 一次性抓取所有必要資料
-with st.spinner("正在載入盤後數據..."):
+with st.spinner("正在載入盤後數據與風控模型..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
 
-# 處理處置狀態
+# 處理處置狀態 (優化字串判定機制)
 is_punished = False
 disp_info = {}
 if not df_disp.empty and 'period_end' in df_disp.columns:
@@ -116,7 +126,14 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
         is_punished = True
         latest = active_disp.sort_values('period_end_dt').iloc[-1]
         measure = latest['measure']
-        match_time = "60分盤" if "六十分" in measure else "20分盤" if "二十分" in measure else "5分盤" if "五分" in measure else "10分盤" if "十分" in measure else "處置中"
+        
+        # 精確匹配撮合時間
+        if "六十分" in measure or "60分" in measure: match_time = "60分盤"
+        elif "二十分" in measure or "20分" in measure: match_time = "20分盤"
+        elif "十分" in measure or "10分" in measure: match_time = "10分盤"
+        elif "五分" in measure or "5分" in measure: match_time = "5分盤"
+        else: match_time = "人工管制盤"
+        
         disp_info = {"period": f"{latest['period_start']} ~ {latest['period_end']}", "measure": measure, "match": match_time}
 
 # 計算收盤價與基本數據
@@ -141,6 +158,7 @@ can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty a
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
 history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
 
+# 法規邏輯：得為融資融券者，即具備當沖資格。
 is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
@@ -157,9 +175,8 @@ with top_col2:
     tags_html += f'<span class="tag-base t-market">{market_name}</span>'
     tags_html += f'<span class="tag-base t-market">{info["industry"]}</span>'
     
-    # 🚨 同時亮起「處置中」與「盤別」的雙重警示標籤
+    # 🚨 處置中：只顯示唯一的確切盤別黃色標籤
     if is_punished: 
-        tags_html += f'<span class="tag-base t-warn">處置中</span>'
         tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
         
     tags_html += f'<span class="tag-base {tag_margin}">資</span>'
@@ -215,7 +232,7 @@ if not df_price.empty:
                     '<div class="card-container">'
                     '<div class="metric-label">風險預測</div>'
                     f'<div class="metric-value" style="color:#ffc107;">🔥 最快 {d} 天內進入處置</div>'
-                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 處置門檻價預估：{p:.2f}</div>'
+                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 處置預估觸發價：{p:.2f}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     f'<div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -226,7 +243,7 @@ if not df_price.empty:
                     '<div class="card-container">'
                     '<div class="metric-label">風險預測</div>'
                     '<div class="metric-value" style="color:#00ff00;">✅ 短期內無處置風險</div>'
-                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 連拉10根漲停亦安全</div>'
+                    f'<div class="metric-sub">明日注意門檻：{p_warn:.2f}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -322,7 +339,7 @@ if not df_price.empty:
     m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr, sub=inst_date_sub)
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
-    # 📏 歷史紀錄 (版面平分設計)
+    # 📏 歷史紀錄 (版面平分設計，限制寬度)
     st.markdown("---")
     h_col1, h_col2 = st.columns(2)
     with h_col1:
