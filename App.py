@@ -46,7 +46,7 @@ def fetch_with_proxy(url):
     """突破政府 API 阻擋的代理伺服器"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
-        r = requests.get(url, headers=headers, timeout=2)
+        r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200: 
             res = r.json()
             if "stat" in res and res["stat"] != "OK": return None
@@ -55,7 +55,7 @@ def fetch_with_proxy(url):
     
     try:
         proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}"
-        r = requests.get(proxy_url, headers=headers, timeout=3)
+        r = requests.get(proxy_url, headers=headers, timeout=5)
         if r.status_code == 200: return r.json()
     except: pass
     return None
@@ -83,14 +83,14 @@ def get_all_info():
     return mapping
 
 @st.cache_data(ttl=3600)
-def get_notice_2years(sid, is_twse):
-    """🚀 終極突破版：完全切碎查詢區間，保證繞過官方 31 天限制"""
+def get_notice_recent(sid, is_twse):
+    """🚀 終極破解版：抓取近 30 交易日 (約60日曆日)，使用本地過濾突破官方 Bug"""
     records = []
     end_dt = datetime.now()
     
     if is_twse:
-        # 上市：切成 25 個 30天的區塊
-        for i in range(25):
+        # 上市：切成 2 個 30 天區塊
+        for i in range(2):
             e_dt = end_dt - timedelta(days=i*30)
             s_dt = e_dt - timedelta(days=29)
             url = f"https://www.twse.com.tw/announcement/notice?response=json&startDate={s_dt.strftime('%Y%m%d')}&endDate={e_dt.strftime('%Y%m%d')}&stockNo={sid}"
@@ -102,29 +102,30 @@ def get_notice_2years(sid, is_twse):
                         ad_date = datetime(int(y)+1911, int(m), int(d))
                         records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
                     except: pass
-            time.sleep(0.05)
+            time.sleep(0.1)
     else:
-        # 上櫃：同樣切成 25 個區塊，確保不出錯
-        for i in range(25):
+        # 上櫃：不傳入代碼，抓全市場再由本地端過濾，徹底解決 TPEx 查詢壞掉的問題！
+        for i in range(2):
             e_dt = end_dt - timedelta(days=i*30)
             s_dt = e_dt - timedelta(days=29)
             start_tw = f"{s_dt.year - 1911:03d}/{s_dt.month:02d}/{s_dt.day:02d}"
             end_tw = f"{e_dt.year - 1911:03d}/{e_dt.month:02d}/{e_dt.day:02d}"
-            url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={start_tw}&ed={end_tw}&s={sid}&o=json"
+            url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={start_tw}&ed={end_tw}&o=json"
             data = fetch_with_proxy(url)
             if data and 'aaData' in data:
                 for item in data['aaData']:
-                    try:
-                        y, m, d = item[0].split('/')
-                        ad_date = datetime(int(y)+1911, int(m), int(d))
-                        records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
-                    except: pass
-            time.sleep(0.05)
+                    if str(item[1]).strip() == sid: # 本地端精準攔截該股票！
+                        try:
+                            y, m, d = item[0].split('/')
+                            ad_date = datetime(int(y)+1911, int(m), int(d))
+                            records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
+                        except: pass
+            time.sleep(0.1)
 
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.drop_duplicates(subset=['年月日']).sort_values('date', ascending=True).reset_index(drop=True)
-        # 🧠 精準計算：近 20 個交易日 (法規換算約 30 個日曆日) 的累積次數
+        # 🧠 精準計算：回溯前 30 日曆日 (約 20 交易日) 的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -424,32 +425,32 @@ if not df_price.empty:
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
     # ==========================================
-    # 📜 對稱雙塔：近 2 年歷史紀錄查詢
+    # 📜 對稱雙塔：近 30 交易日歷史紀錄查詢
     # ==========================================
     st.markdown("---")
     h_col1, h_col2 = st.columns(2)
     
     # ⬅️ 左手邊：注意股歷史
     with h_col1:
-        df_notice = get_notice_2years(sid, is_twse)
+        df_notice = get_notice_recent(sid, is_twse)
         notice_count = len(df_notice) if not df_notice.empty else 0
-        with st.expander(f"📜 近 2 年【注意股】歷史紀錄 (共 {notice_count} 次)"):
+        with st.expander(f"📜 近 30 交易日【注意股】歷史紀錄 (共 {notice_count} 次)"):
             if not df_notice.empty:
                 st.dataframe(df_notice, hide_index=True, use_container_width=True)
             else: 
-                st.write("近 2 年內無注意紀錄")
+                st.write("近 30 交易日內無注意紀錄")
                 
     # ➡️ 右手邊：處置股歷史
     with h_col2:
-        start_2y = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
-        h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_2y)
-        with st.expander(f"🛑 近 2 年【處置股】歷史紀錄 (共 {len(h_df) if not h_df.empty else 0} 次)"):
+        start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+        h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
+        with st.expander(f"🛑 近 30 交易日【處置股】歷史紀錄 (共 {len(h_df) if not h_df.empty else 0} 次)"):
             if not h_df.empty:
                 h_df['盤別'] = h_df['measure'].apply(extract_match_type)
                 h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
                 st.dataframe(h_df.rename(columns={'period_start':'起始日', 'period_end':'結束日', 'measure':'條款與措施'}), hide_index=True, use_container_width=True)
             else: 
-                st.write("近 2 年內無處置紀錄")
+                st.write("近 30 交易日內無處置紀錄")
 
 else:
     st.error("查無此標的或歷史報價抓取失敗。")
