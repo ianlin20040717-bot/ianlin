@@ -83,9 +83,9 @@ def get_all_info():
 
 @st.cache_data(ttl=3600)
 def get_notice_2years(sid, is_twse):
-    """突破限制，抓取過去 2 年注意股歷史"""
+    """突破限制，抓取過去 2 年注意股歷史與累積次數"""
     if not is_twse:
-        return pd.DataFrame([{"年月日": "-", "累計次數": "-", "觸發條款": "上櫃歷史注意股請至櫃買中心查詢。"}])
+        return pd.DataFrame([{"年月日": "⚠️ 官方限制", "近20交易日累計次數": "-", "觸發條款": "櫃買中心(上櫃)官方API不支援歷史區間查詢。蔚華科為上櫃股票，需至櫃買官網逐日查詢。"}])
         
     records = []
     # 迴圈抓取 4 個半年的區間 (共2年)
@@ -96,20 +96,31 @@ def get_notice_2years(sid, is_twse):
         data = fetch_with_proxy(url)
         if data and 'data' in data:
             for item in data['data']:
-                records.append({"年月日": item[0], "觸發條款": item[3]})
+                try:
+                    y, m, d = item[0].split('/')
+                    ad_date = datetime(int(y)+1911, int(m), int(d))
+                    records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
+                except: pass
                 
     df = pd.DataFrame(records)
     if not df.empty:
-        df = df.drop_duplicates(subset=['年月日']).sort_values('年月日', ascending=False).reset_index(drop=True)
-        # 自動給予近兩年內的累計次數編號
-        df['2年內累計次數'] = range(len(df), 0, -1)
-        df = df[['年月日', '2年內累計次數', '觸發條款']]
-    return df
+        df = df.drop_duplicates(subset=['年月日']).sort_values('date', ascending=True).reset_index(drop=True)
+        # 精準計算：近 20 個交易日(約 30 個日曆日)的累積次數
+        counts = []
+        for i in range(len(df)):
+            curr_date = df.loc[i, 'date']
+            start_window = curr_date - timedelta(days=30) 
+            c = len(df[(df['date'] <= curr_date) & (df['date'] > start_window)])
+            counts.append(f"第 {c} 次")
+        
+        df['近20交易日累計次數'] = counts
+        df = df.sort_values('date', ascending=False).reset_index(drop=True)
+        return df[['年月日', '近20交易日累計次數', '觸發條款']]
+    return pd.DataFrame()
 
-# 🚀 徹底重構：法規智能映射引擎 (絕對不再出現「人工管制」)
+# 🚀 法規智能映射引擎 (絕對不再出現「人工管制」)
 def extract_match_type(measure):
     m = str(measure)
-    # 優先判定明確的分鐘數
     if any(k in m for k in ["九十分", "90分"]): return "90分盤"
     if any(k in m for k in ["六十分", "60分", "第三次", "第四次", "第五次"]): return "60分盤"
     if any(k in m for k in ["四十五分", "45分"]): return "45分盤"
@@ -117,8 +128,6 @@ def extract_match_type(measure):
     if any(k in m for k in ["二十分", "20分", "第二次"]): return "20分盤"
     if any(k in m for k in ["十分", "10分"]): return "10分盤"
     if any(k in m for k in ["五分", "5分", "第一次"]): return "5分盤"
-    
-    # 兜底法規：只要被列入處置，最基本就是 5分盤 起跳
     return "5分盤"
 
 # --- 核心風險邏輯 ---
@@ -185,7 +194,7 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
         disp_info = {
             "period": f"{latest['period_start']} ~ {latest['period_end']}", 
             "measure": measure, 
-            "match": extract_match_type(measure) # 完美調用智能映射
+            "match": extract_match_type(measure) 
         }
 
 # 計算收盤價與基本數據
@@ -205,7 +214,7 @@ else:
     p_now, today_vol, price_date_str = 0, 0, ""
 
 # 🛡️ 智能標籤體質判定
-market_name = "上市" if info['market'] == 'twse' else "上櫃"
+market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
 history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
@@ -299,7 +308,7 @@ if not df_price.empty:
                 )
                 st.markdown(html_content, unsafe_allow_html=True)
 
-    # --- 矩陣數據區 (共 3 列) ---
+    # --- 矩陣數據區 ---
     def m_card(c, l, v, clr="white", sub=""):
         card_html = (
             '<div class="card-container" style="padding:15px;">'
@@ -408,7 +417,6 @@ if not df_price.empty:
         h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_2y)
         with st.expander(f"🛑 近 2 年【處置股】歷史紀錄 (共 {len(h_df) if not h_df.empty else 0} 次)"):
             if not h_df.empty:
-                # 調用完美的法規映射引擎
                 h_df['盤別'] = h_df['measure'].apply(extract_match_type)
                 h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
                 st.dataframe(h_df.rename(columns={'period_start':'起始日', 'period_end':'結束日', 'measure':'條款與措施'}), hide_index=True, use_container_width=True)
