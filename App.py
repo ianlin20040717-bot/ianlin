@@ -105,7 +105,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (冷卻期與排他條款鎖定版)
+# 🧠 核心：本地端法規判定引擎 (新增第三款、第四款15%閥值)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -130,10 +130,9 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
-    # 🛡️ 官方防呆系統：紀錄上一次觸發的 Index，落實 6 日冷卻期
+    # 官方防呆系統：紀錄上一次觸發的 Index (第10、11、13款適用6日冷卻期)
     last_trigger = {
         "rule1": -999,
-        "rule4": -999,
         "rule10": -999,
         "rule11": -999,
         "rule13": -999
@@ -168,7 +167,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 taiex_c = taiex_dict.get(dt_str_curr, 0)
                 taiex_p6 = taiex_dict.get(dt_str_p6, 0)
                 taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
-                
                 if abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20: 
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
@@ -180,21 +178,27 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                         reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
                         last_trigger["rule1"] = i
-            
-            # --- 🔥 第四款：價格 + 週轉率 (過濾 5/25 假警報) ---
-            if abs(ret_6d_raw) >= 25 and daily_turnover >= 20:
-                if (i - last_trigger["rule4"]) >= 6:
-                    word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
-                    last_trigger["rule4"] = i
 
-            # --- 🔥 第十款：累積週轉率異常 (導入 6日冷卻期 與 同日排他消音) ---
+            # --- 🔥 第三款：價格 + 成交量異常放大 ---
+            if i >= 60:
+                avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
+                daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
+                vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
+                # 實戰門檻：漲跌幅達25% 且成交量較60日均量放大5倍以上
+                if abs(ret_6d_raw) >= 25 and vol_ratio >= 5:
+                    word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
+            
+            # --- 🔥 第四款：價格 + 週轉率 (完美 15% 門檻) ---
+            if abs(ret_6d_raw) >= 25 and daily_turnover >= 15:
+                word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                reasons.append(f"當日週轉率達{daily_turnover:.1f}%(第四款)" if "第三款" in "".join(reasons) else f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
+
+            # --- 第十款：累積週轉率異常 (80% / 20% 門檻) ---
             if turnover_6d >= 80 and daily_turnover >= 20: 
                 if (i - last_trigger["rule10"]) >= 6:
-                    # 排他機制：若當日已經觸發更嚴格的第四款，第十款強制消音！
-                    if last_trigger["rule4"] != i:
-                        reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
-                        last_trigger["rule10"] = i
+                    reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
+                    last_trigger["rule10"] = i
 
         # --- 第十一款：絕對價差異常 ---
         if i >= 5:
@@ -309,7 +313,7 @@ is_twse = (info['market'] == 'twse' or info['market'] == '上市')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在啟動極致雙軌分流推演引擎..."):
+with st.spinner("正在啟動全天條覆蓋之極致推演引擎..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
@@ -352,7 +356,6 @@ if not df_price.empty:
     price_date_str = pd.to_datetime(df_price.index[-1]).strftime('%m/%d')
     price_date_str_full = pd.to_datetime(df_price.index[-1]).strftime('%Y-%m-%d')
     
-    # 漲跌停極限判定
     is_limit_up = pct >= 9.5
     is_limit_down = pct <= -9.5
     if is_limit_up:
@@ -368,7 +371,6 @@ else:
     p_now, today_vol, price_date_str, price_date_str_full = 0, 0, "", ""
     c_class, arrow_sub_class = "", ""
 
-# 🔥 核心：全局提早計算本地注意股清單
 df_notice_local = calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
 
 # ==========================================
@@ -415,7 +417,6 @@ with top_col2:
 
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
-# 🔥 動態公告橫幅
 if not df_notice_local.empty and price_date_str_full != "":
     latest_notice_row = df_notice_local.iloc[0]
     if latest_notice_row['年月日'] == price_date_str_full:
