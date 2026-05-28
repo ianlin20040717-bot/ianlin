@@ -43,7 +43,6 @@ st.markdown("""
 # 📡 資料抓取與輔助模組
 # ==========================================
 def fetch_with_proxy(url):
-    """突破政府 API 阻擋的代理伺服器"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         r = requests.get(url, headers=headers, timeout=3)
@@ -84,12 +83,10 @@ def get_all_info():
 
 @st.cache_data(ttl=3600)
 def get_notice_recent(sid, is_twse):
-    """🚀 終極破解版：抓取近 30 交易日 (約60日曆日)，使用本地過濾突破官方 Bug"""
     records = []
     end_dt = datetime.now()
     
     if is_twse:
-        # 上市：切成 2 個 30 天區塊
         for i in range(2):
             e_dt = end_dt - timedelta(days=i*30)
             s_dt = e_dt - timedelta(days=29)
@@ -104,7 +101,6 @@ def get_notice_recent(sid, is_twse):
                     except: pass
             time.sleep(0.1)
     else:
-        # 上櫃：不傳入代碼，抓全市場再由本地端過濾，徹底解決 TPEx 查詢壞掉的問題！
         for i in range(2):
             e_dt = end_dt - timedelta(days=i*30)
             s_dt = e_dt - timedelta(days=29)
@@ -114,7 +110,7 @@ def get_notice_recent(sid, is_twse):
             data = fetch_with_proxy(url)
             if data and 'aaData' in data:
                 for item in data['aaData']:
-                    if str(item[1]).strip() == sid: # 本地端精準攔截該股票！
+                    if str(item[1]).strip() == sid: 
                         try:
                             y, m, d = item[0].split('/')
                             ad_date = datetime(int(y)+1911, int(m), int(d))
@@ -125,7 +121,6 @@ def get_notice_recent(sid, is_twse):
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.drop_duplicates(subset=['年月日']).sort_values('date', ascending=True).reset_index(drop=True)
-        # 🧠 精準計算：回溯前 30 日曆日 (約 20 交易日) 的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -138,7 +133,6 @@ def get_notice_recent(sid, is_twse):
         return df[['年月日', '近20日累計次數', '觸發條款']]
     return pd.DataFrame()
 
-# 🚀 絕對防呆機制：法規智能映射引擎 (徹底消滅「人工管制」)
 def extract_match_type(measure):
     m = str(measure)
     if any(k in m for k in ["九十分", "90分"]): return "90分盤"
@@ -148,17 +142,13 @@ def extract_match_type(measure):
     if any(k in m for k in ["二十分", "20分"]): return "20分盤"
     if any(k in m for k in ["十分", "10分"]): return "10分盤"
     if any(k in m for k in ["五分", "5分"]): return "5分盤"
-    
-    # 兜底法規：只要資料庫寫出次數，強制作對應
     if "第五次" in m: return "90分盤"
     if "第四次" in m: return "60分盤"
     if "第三次" in m: return "45分盤"
     if "第二次" in m: return "20分盤"
     if "第一次" in m: return "5分盤"
-    
-    return "5分盤" # 終極兜底
+    return "5分盤"
 
-# --- 核心風險邏輯 ---
 def calc_risk(prices):
     l = len(prices)
     if l < 6: return False
@@ -172,7 +162,7 @@ def calc_risk(prices):
 def simulate(prices, streak):
     sim = list(prices)
     for day in range(1, 11):
-        next_p = sim[-1] * 1.099 # 模擬每日漲停
+        next_p = sim[-1] * 1.099
         sim.append(next_p)
         if calc_risk(sim): streak += 1
         else: streak = 0
@@ -187,7 +177,6 @@ if not stock_list:
     st.error("正在連線 FinMind 或 Token 無效，請確認網路與設定。")
     st.stop()
 
-# 🎯 第一列：搜尋框與標籤列
 top_col1, top_col2 = st.columns([1, 1])
 
 with top_col1:
@@ -200,7 +189,6 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-# 一次性抓取所有必要資料
 with st.spinner("正在載入盤後數據與風控模型..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
@@ -208,7 +196,6 @@ with st.spinner("正在載入盤後數據與風控模型..."):
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
 
-# 處理處置狀態
 is_punished = False
 disp_info = {}
 if not df_disp.empty and 'period_end' in df_disp.columns:
@@ -225,7 +212,6 @@ if not df_disp.empty and 'period_end' in df_disp.columns:
             "match": extract_match_type(measure) 
         }
 
-# 計算收盤價與基本數據
 if not df_price.empty:
     df_price['date'] = pd.to_datetime(df_price['date'])
     df_price = df_price.set_index('date').sort_index()
@@ -241,12 +227,31 @@ if not df_price.empty:
 else:
     p_now, today_vol, price_date_str = 0, 0, ""
 
-# 🛡️ 智能標籤體質判定
+# ------------------------------
+# 🚀 獨家：量能與周轉率倒推模型
+# ------------------------------
+total_sheets = 0
+if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
+    limit = df_margin['MarginPurchaseLimit'].max()
+    if pd.notna(limit) and limit > 0:
+        total_sheets = (limit * 4) / 1000  # 融資限額通常為發行張數的 25%
+
+turnover_warn_str = ""
+if total_sheets > 0 and not df_price.empty and len(closes) >= 5:
+    vols_5d_lots = vols.tail(5).sum() / 1000
+    threshold_50_pct = total_sheets * 0.5
+    turnover_warn_volume = threshold_50_pct - vols_5d_lots
+    if turnover_warn_volume <= 0:
+        turnover_warn_str = "⚠️ 已達 50% 警戒，任何放量皆可能觸發"
+    else:
+        turnover_warn_str = f"約 {turnover_warn_volume:,.0f} 張"
+else:
+    turnover_warn_str = "無法估算 (無資券限額資料)"
+
 market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
 history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
-
 is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
@@ -261,24 +266,20 @@ with top_col2:
     tags_html = '<div class="tags-container">'
     tags_html += f'<span class="tag-base t-market">{market_name}</span>'
     tags_html += f'<span class="tag-base t-market">{info["industry"]}</span>'
-    
     if is_punished: 
         tags_html += f'<span class="tag-base t-warn">處置中</span>'
         tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
-        
     tags_html += f'<span class="tag-base {tag_margin}">資</span>'
     tags_html += f'<span class="tag-base {tag_short}">券</span>'
     tags_html += f'<span class="tag-base {tag_day}">沖</span>'
     tags_html += f'<span class="tag-base {tag_future}">期</span>'
     tags_html += f'<span class="tag-base {tag_warrant}">權</span>'
     tags_html += '</div>'
-    
     st.markdown(tags_html, unsafe_allow_html=True)
 
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
 if not df_price.empty:
-    # --- 第一行看板 ---
     c1, c2 = st.columns(2)
     with c1:
         p_html = (
@@ -297,6 +298,7 @@ if not df_price.empty:
                 '<div class="metric-label">風險預測</div>'
                 f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中</div>'
                 f'<div class="metric-sub">處置期間：{disp_info["period"]}</div>'
+                f'<div class="metric-sub" style="color:#888; margin-top:8px;">(處置期間無須計算周轉率紅線)</div>'
                 '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                 '<div style="width:100%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                 '</div></div>'
@@ -319,6 +321,7 @@ if not df_price.empty:
                     '<div class="metric-label">風險預測</div>'
                     f'<div class="metric-value" style="color:#ffc107;">🔥 最快 {d} 天內進入處置 (或再次處置)</div>'
                     f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 處置預估觸發價：{p:.2f}</div>'
+                    f'<div class="metric-sub" style="color:#ff4b4b; margin-top:8px;">🚨 6日/50% 週轉率爆量警戒：{turnover_warn_str}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     f'<div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -330,13 +333,13 @@ if not df_price.empty:
                     '<div class="metric-label">風險預測</div>'
                     '<div class="metric-value" style="color:#00ff00;">✅ 短期內無處置風險</div>'
                     f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 連拉10根漲停亦安全</div>'
+                    f'<div class="metric-sub" style="color:#f5c518; margin-top:8px;">📊 6日/50% 週轉率爆量警戒：{turnover_warn_str}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
                 )
                 st.markdown(html_content, unsafe_allow_html=True)
 
-    # --- 矩陣數據區 ---
     def m_card(c, l, v, clr="white", sub=""):
         card_html = (
             '<div class="card-container" style="padding:15px;">'
@@ -347,7 +350,6 @@ if not df_price.empty:
         )
         c.markdown(card_html, unsafe_allow_html=True)
 
-    # 📏 第 1 列
     col_r1 = st.columns(4)
     vol_lots = today_vol / 1000 
     turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
@@ -364,7 +366,6 @@ if not df_price.empty:
     m_card(col_r1[2], "週轉率", f"{turnover:.2f} 倍", sub="相對於均量")
     m_card(col_r1[3], "券資比", f"{short_ratio:.1f}%", sub=margin_date_sub)
 
-    # 📏 第 2 列
     col_r2 = st.columns(4)
     day_pct, day_vol_lots, day_date_sub = 0, 0, ""
     if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns:
@@ -383,7 +384,6 @@ if not df_price.empty:
     m_card(col_r2[2], "當沖獲利率", "N/A", clr="#555")     
     m_card(col_r2[3], "當沖成交張數", f"{day_vol_lots:,.0f} 張", sub=day_date_sub)
 
-    # 📏 第 3 列
     col_r3 = st.columns(4)
     f_amt, t_amt, d_amt, total_amt = 0, 0, 0, 0
     inst_date_sub = ""
@@ -424,13 +424,9 @@ if not df_price.empty:
     m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr, sub=inst_date_sub)
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
-    # ==========================================
-    # 📜 對稱雙塔：近 30 交易日歷史紀錄查詢
-    # ==========================================
     st.markdown("---")
     h_col1, h_col2 = st.columns(2)
     
-    # ⬅️ 左手邊：注意股歷史
     with h_col1:
         df_notice = get_notice_recent(sid, is_twse)
         notice_count = len(df_notice) if not df_notice.empty else 0
@@ -440,7 +436,6 @@ if not df_price.empty:
             else: 
                 st.write("近 30 交易日內無注意紀錄")
                 
-    # ➡️ 右手邊：處置股歷史
     with h_col2:
         start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
         h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
