@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timedelta
 
 # ==========================================
-# 🔑 100% FinMind VIP Token 設定
+# 🔑 FinMind VIP Token 設定
 # ==========================================
 FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8"
 
@@ -12,7 +12,7 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
 # ==========================================
-# 🎨 自訂 CSS (包含動態標籤與紅綠字體)
+# 🎨 自訂 CSS
 # ==========================================
 st.markdown("""
 <style>
@@ -20,17 +20,12 @@ st.markdown("""
     .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; }
     .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
     .metric-sub { font-size: 13px; font-weight: 500; margin-top: 5px; color: #888; }
-    
-    /* 頂部標籤列排版 */
     .tags-container { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; height: 100%; padding-bottom: 5px; }
-    
-    /* 標籤樣式 */
     .tag-base { padding: 4px 12px; border-radius: 4px; font-size: 13px; font-weight: 600; border: 1px solid #444; }
     .t-market { background-color: #2e2e38; color: #ddd; }
     .t-warn { background-color: #ffc107; color: #000; border: none; font-size: 14px; }
     .t-on { background-color: #3b3b4f; color: #fff; border-color: #666; }
     .t-off { background-color: #1a1a21; color: #555; border-color: #333; }
-    
     .red-text { color: #ff4b4b !important; }
     .green-text { color: #00ff00 !important; }
     .title-text { font-size: 32px; font-weight: 800; color: #fff; margin-bottom: 25px; }
@@ -38,7 +33,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 資料抓取與輔助模組
+# 📡 資料抓取模組
 # ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -63,22 +58,21 @@ def get_all_info():
     return mapping
 
 # ==========================================
-# 🧠 霸氣自研：本地端法規判定引擎 4.0 (含大盤校正)
+# 🧠 核心：本地端法規判定引擎 (嚴格遵守異常標準詳細數據)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
-    """完美重現證交所第1款、第10款與第13款等複合天條"""
     records = []
     if df_price.empty or len(df_price) < 7:
         return pd.DataFrame()
 
-    # 1. 🛡️ 取得總發行張數 (徹底捨棄錯誤的數量級判斷，FinMind 融資限額統一為股)
+    # 1. 取得總發行張數 (利用融資限額反推，統一校正為「張」)
     total_sheets = 0
     if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
         limit = df_margin['MarginPurchaseLimit'].max()
         if pd.notna(limit) and limit > 0:
-            total_sheets = (limit * 4) / 1000 
+            total_sheets = (limit * 4) / 1000 if limit >= 1000000 else (limit * 4)
 
-    # 2. 建立當沖字典提升比對速度
+    # 2. 當沖字典
     day_dict = {}
     if not df_day.empty:
         vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
@@ -90,7 +84,7 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
             if dt_pct < 1 and dt_pct > 0: dt_pct *= 100
             day_dict[dt_str] = {'vol': dt_vol, 'pct': dt_pct}
 
-    # 3. 建立大盤 (TAIEX) 字典，作為漲跌幅偏離基準
+    # 3. 大盤字典 (用於計算差幅，過濾第1款假警報)
     taiex_dict = {}
     if not df_taiex.empty:
         df_taiex['date'] = pd.to_datetime(df_taiex['date'])
@@ -103,25 +97,24 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
     for i in range(len(df_price) - scan_range, len(df_price)):
         curr_date = df_price.index[i]
         c_close = df_price['close'].iloc[i]
-        
         reasons = []
+        dt_str_curr = curr_date.strftime('%Y-%m-%d')
 
-        # --- 法規條件 A：第1款 漲跌幅異常 (含大盤偏離率) ---
+        # --- 第1款：累積漲跌幅異常 (需比較大盤) ---
         if i >= 6:
-            p_close_6 = df_price['close'].iloc[i-6] # 基準日為 T-6
+            p_close_6 = df_price['close'].iloc[i-6]
             ret_6d = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             
-            dt_str_curr = curr_date.strftime('%Y-%m-%d')
             dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
             taiex_c = taiex_dict.get(dt_str_curr, 0)
             taiex_p6 = taiex_dict.get(dt_str_p6, 0)
             taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
             
-            # 完美復刻：絕對漲跌幅 > 25% 且 偏離大盤 > 20%
+            # 法規詳細數據：絕對漲跌幅 >= 25% 且 偏離大盤 >= 20%
             if abs(ret_6d) >= 25 and abs(ret_6d - taiex_ret_6d) >= 20: 
-                reasons.append(f"6日累積漲跌幅達 {abs(ret_6d):.1f}% (偏離大盤>20%)")
+                reasons.append(f"第1款：6日漲跌幅達 {abs(ret_6d):.1f}% (偏離大盤)")
         
-        # --- 法規條件 B：第10款 週轉率異常 ---
+        # --- 第10款：累積週轉率異常 ---
         if total_sheets > 0:
             vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
             turnover_6d = (vol_6d_lots / total_sheets * 100) 
@@ -129,45 +122,43 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
             daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
             daily_turnover = (daily_vol_lots / total_sheets * 100)
             
-            # 完美復刻：6日 > 50% 且 當日 > 10%
-            if turnover_6d >= 50 and daily_turnover >= 10: 
-                reasons.append(f"6日累積週轉率達 {turnover_6d:.1f}%，當日達 {daily_turnover:.1f}%")
+            # 法規詳細數據：6日累積 >= 50% 且 當日 >= 20% (依據使用者回饋參數微調)
+            if turnover_6d >= 50 and daily_turnover >= 20: 
+                reasons.append(f"第10款：6日週轉率 {turnover_6d:.1f}%，當日 {daily_turnover:.1f}%")
 
-        # --- 法規條件 C：第13款 當沖異常 ---
+        # --- 第13款：當沖異常 ---
         total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
         dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
         dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
         
-        dt_str = curr_date.strftime('%Y-%m-%d')
-        daily_dt_pct = day_dict.get(dt_str, {}).get('pct', 0)
-        if daily_dt_pct == 0 and day_dict.get(dt_str, {}).get('vol', 0) > 0:
+        daily_dt_pct = day_dict.get(dt_str_curr, {}).get('pct', 0)
+        if daily_dt_pct == 0 and day_dict.get(dt_str_curr, {}).get('vol', 0) > 0:
             daily_vol = df_price['Trading_Volume'].iloc[i]
-            daily_dt_pct = (day_dict[dt_str]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
+            daily_dt_pct = (day_dict[dt_str_curr]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
         
-        # 完美復刻：6日當沖 > 60% 且 當日 > 60%
+        # 法規詳細數據：6日當沖占比 >= 60% 且 當日當沖占比 >= 60%
         if dt_pct_6d >= 60 and daily_dt_pct >= 60:
-            reasons.append(f"6日累積當沖率達 {dt_pct_6d:.1f}%，當日達 {daily_dt_pct:.1f}%")
+            reasons.append(f"第13款：6日當沖率 {dt_pct_6d:.1f}%，當日 {daily_dt_pct:.1f}%")
 
-        # --- 法規條件 D：長線暴衝 ---
+        # --- 長線暴衝條款 ---
         if i >= 30:
             p30 = df_price['close'].iloc[i-30]
-            if p30 > 0 and (c_close / p30 - 1) >= 1.0: reasons.append("30日漲幅過大(>100%)")
+            if p30 > 0 and (c_close / p30 - 1) >= 1.0: reasons.append("30日漲幅>100%")
         if i >= 60:
             p60 = df_price['close'].iloc[i-60]
-            if p60 > 0 and (c_close / p60 - 1) >= 1.3: reasons.append("60日漲幅過大(>130%)")
+            if p60 > 0 and (c_close / p60 - 1) >= 1.3: reasons.append("60日漲幅>130%")
         if i >= 90:
             p90 = df_price['close'].iloc[i-90]
-            if p90 > 0 and (c_close / p90 - 1) >= 1.6: reasons.append("90日漲幅過大(>160%)")
+            if p90 > 0 and (c_close / p90 - 1) >= 1.6: reasons.append("90日漲幅>160%")
 
-        # 有觸發嚴格條件才記錄
         if reasons:
             records.append({
                 "date": curr_date,
-                "年月日": dt_str,
+                "年月日": dt_str_curr,
                 "觸發條款": "；".join(reasons)
             })
 
-    # 4. 結算 DataFrame 與計算近期累積次數
+    # 結算與累積次數
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.sort_values('date', ascending=False).reset_index(drop=True)
@@ -202,7 +193,6 @@ def calc_risk(prices):
     l = len(prices)
     if l < 7: return False
     now = prices[-1]
-    # 同步修改預測引擎的基準日為 T-6 (Index -7)
     c1 = (abs(now / prices[-7] - 1) > 0.25) if l >= 7 else False
     c2 = (now / prices[-31] - 1 > 1.0) if l >= 31 else False
     c3 = (now / prices[-61] - 1 > 1.3) if l >= 61 else False
@@ -241,7 +231,7 @@ safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
 
 with st.spinner("正在透過本地引擎嚴格推演量價風控模型..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
-    # 🔥 核心修正：同步載入大盤指數作為偏離率基準
+    # 同步載入大盤指數作為基準
     df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
