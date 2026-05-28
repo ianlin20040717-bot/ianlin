@@ -83,10 +83,12 @@ def get_all_info():
 
 @st.cache_data(ttl=3600)
 def get_notice_recent(sid, is_twse):
+    """🚀 終極破解版：針對上櫃 API 不支援區間的問題，改為逐日狙擊"""
     records = []
     end_dt = datetime.now()
     
     if is_twse:
+        # 上市：TWSE 支援區間查詢，直接切成 2 個 30 天區塊
         for i in range(2):
             e_dt = end_dt - timedelta(days=i*30)
             s_dt = e_dt - timedelta(days=29)
@@ -101,26 +103,30 @@ def get_notice_recent(sid, is_twse):
                     except: pass
             time.sleep(0.1)
     else:
-        for i in range(2):
-            e_dt = end_dt - timedelta(days=i*30)
-            s_dt = e_dt - timedelta(days=29)
-            start_tw = f"{s_dt.year - 1911:03d}/{s_dt.month:02d}/{s_dt.day:02d}"
-            end_tw = f"{e_dt.year - 1911:03d}/{e_dt.month:02d}/{e_dt.day:02d}"
-            url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={start_tw}&ed={end_tw}&o=json"
+        # 上櫃：TPEx 無視結束日期參數。必須手動回推 45 天，逐日查詢！
+        for i in range(45):
+            query_dt = end_dt - timedelta(days=i)
+            # 💡 加速優化：週末沒有盤後公告，直接跳過
+            if query_dt.weekday() >= 5: continue
+            
+            q_tw = f"{query_dt.year - 1911:03d}/{query_dt.month:02d}/{query_dt.day:02d}"
+            url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={q_tw}&o=json"
             data = fetch_with_proxy(url)
             if data and 'aaData' in data:
                 for item in data['aaData']:
+                    # 抓回全市場資料後，在本地端精準攔截我們的股票代碼
                     if str(item[1]).strip() == sid: 
                         try:
                             y, m, d = item[0].split('/')
                             ad_date = datetime(int(y)+1911, int(m), int(d))
                             records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
                         except: pass
-            time.sleep(0.1)
+            time.sleep(0.05) # 微停頓保護 IP
 
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.drop_duplicates(subset=['年月日']).sort_values('date', ascending=True).reset_index(drop=True)
+        # 🧠 精準計算：回溯前 30 日曆日 (約 20 交易日) 的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -180,7 +186,7 @@ if not stock_list:
 top_col1, top_col2 = st.columns([1, 1])
 
 with top_col1:
-    search = st.selectbox("🔍 搜尋標的", options=list(stock_list.keys()), index=list(stock_list.keys()).index("3576 聯合再生") if "3576 聯合再生" in stock_list else 0)
+    search = st.selectbox("🔍 搜尋標的", options=list(stock_list.keys()), index=list(stock_list.keys()).index("5425 台半") if "5425 台半" in stock_list else 0)
 
 info = stock_list[search]
 sid = info['id']
@@ -189,7 +195,7 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在載入盤後數據與風控模型..."):
+with st.spinner("正在載入盤後數據與風控模型 (上櫃股票將逐日掃描注意歷史，請稍候幾秒)..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
@@ -228,13 +234,13 @@ else:
     p_now, today_vol, price_date_str = 0, 0, ""
 
 # ------------------------------
-# 🚀 獨家：量能與周轉率倒推模型
+# 🚀 量能與周轉率倒推模型
 # ------------------------------
 total_sheets = 0
 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
     limit = df_margin['MarginPurchaseLimit'].max()
     if pd.notna(limit) and limit > 0:
-        total_sheets = (limit * 4) / 1000  # 融資限額通常為發行張數的 25%
+        total_sheets = (limit * 4) / 1000
 
 turnover_warn_str = ""
 if total_sheets > 0 and not df_price.empty and len(closes) >= 5:
