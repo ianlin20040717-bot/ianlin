@@ -67,7 +67,7 @@ def get_outstanding_shares(sid):
 # ==========================================
 # 🧠 核心：本地端法規判定引擎 (實戰逆向工程封神版)
 # ==========================================
-def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
+def calculate_local_attention(df_price, df_day, total_sheets):
     records = []
     if df_price.empty or len(df_price) < 7:
         return pd.DataFrame()
@@ -83,14 +83,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
             if dt_pct < 1 and dt_pct > 0: dt_pct *= 100
             day_dict[dt_str] = {'vol': dt_vol, 'pct': dt_pct}
 
-    taiex_dict = {}
-    if not df_taiex.empty:
-        df_taiex['date'] = pd.to_datetime(df_taiex['date'])
-        for _, r in df_taiex.iterrows():
-            dt_str = r['date'].strftime('%Y-%m-%d')
-            taiex_dict[dt_str] = r['close']
-
-    # 🛡️ 官方防刷警報系統：紀錄上一次觸發位置
+    # 🛡️ 官方防刷警報系統：紀錄上一次觸發位置 (實施6個營業日冷卻期)
     last_trigger = {
         "rule1": -999,
         "rule4": -999,
@@ -103,16 +96,12 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
         curr_date = df_price.index[i]
         c_close = df_price['close'].iloc[i]
         dt_str_curr = curr_date.strftime('%Y-%m-%d')
+        
         reasons = []
 
         if i >= 6:
             p_close_6 = df_price['close'].iloc[i-6]
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
-            
-            dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
-            taiex_c = taiex_dict.get(dt_str_curr, 0)
-            taiex_p6 = taiex_dict.get(dt_str_p6, 0)
-            taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
             
             # 計算週轉率
             if total_sheets > 0:
@@ -124,24 +113,23 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # --- 第1款：極端漲跌幅 (提高門檻至 32% 以濾除無產業指數之假警報) ---
-            if abs(ret_6d_raw) >= 32 and abs(ret_6d_raw - taiex_ret_6d) >= 20: 
+            # --- 第1款：純價格極端異常 (提高門檻至30%過濾假警報) ---
+            if abs(ret_6d_raw) >= 30: 
                 if (i - last_trigger["rule1"]) >= 6:
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                     last_trigger["rule1"] = i
             
-            # --- 🔥 破解版 第4款：漲幅 + 週轉率 ---
-            if abs(ret_6d_raw) >= 25 and daily_turnover >= 10:
-                is_cooldown = (i - last_trigger["rule4"] < 6) or (i - last_trigger["rule10"] < 6)
-                # 突破冷卻期條件：當日週轉率必須高達 20% (完美解釋 5/28 通過而 5/25 被擋)
-                if not is_cooldown or (is_cooldown and daily_turnover >= 20):
+            # --- 🔥 第4款：價格 + 週轉率雙重鎖定 ---
+            # 過濾 5/11 與 5/25 的低週轉率，精準命中 5/28
+            if abs(ret_6d_raw) >= 28 and daily_turnover >= 20:
+                if (i - last_trigger["rule4"]) >= 6:
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
                     last_trigger["rule4"] = i
 
-            # --- 🔥 破解版 第10款：累積週轉率異常 ---
-            if turnover_6d >= 50 and daily_turnover >= 20: 
+            # --- 🔥 第10款：累積週轉率異常 (80%天際線) ---
+            if turnover_6d >= 80 and daily_turnover >= 20: 
                 if (i - last_trigger["rule10"]) >= 6:
                     reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
                     last_trigger["rule10"] = i
@@ -238,9 +226,8 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在透過本地引擎嚴格推演量價風控模型..."):
+with st.spinner("正在加載高精度量價推演引擎..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
-    df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
@@ -491,8 +478,8 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用嚴格包含冷卻期與大盤濾網的引擎
-        df_notice = calculate_local_attention(df_price, df_day, df_taiex, total_sheets)
+        # 🔥 調用掛載「冷卻排他系統」的終極引擎
+        df_notice = calculate_local_attention(df_price, df_day, total_sheets)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
             if not df_notice.empty:
