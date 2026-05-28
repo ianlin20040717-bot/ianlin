@@ -65,7 +65,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (新增：官方冷卻與排他除外條款)
+# 🧠 核心：本地端法規判定引擎 (實戰逆向工程封神版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
     records = []
@@ -90,9 +90,10 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
-    # 🛡️ 官方防刷警報系統：紀錄上一次觸發的 Index 位置 (實施6日冷卻期)
+    # 🛡️ 官方防刷警報系統：紀錄上一次觸發位置
     last_trigger = {
         "rule1": -999,
+        "rule4": -999,
         "rule10": -999,
         "rule13": -999
     }
@@ -102,11 +103,8 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
         curr_date = df_price.index[i]
         c_close = df_price['close'].iloc[i]
         dt_str_curr = curr_date.strftime('%Y-%m-%d')
-        
         reasons = []
-        rule1_hit_today = False
 
-        # --- 第1款：累積漲跌幅異常 ---
         if i >= 6:
             p_close_6 = df_price['close'].iloc[i-6]
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
@@ -116,24 +114,35 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
             taiex_p6 = taiex_dict.get(dt_str_p6, 0)
             taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
             
-            if abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20: 
-                # 檢查冷卻期：6個營業日之內不會重複通報
+            # 計算週轉率
+            if total_sheets > 0:
+                vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
+                turnover_6d = (vol_6d_lots / total_sheets * 100) 
+                daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
+                daily_turnover = (daily_vol_lots / total_sheets * 100)
+            else:
+                turnover_6d = 0
+                daily_turnover = 0
+
+            # --- 第1款：極端漲跌幅 (提高門檻至 32% 以濾除無產業指數之假警報) ---
+            if abs(ret_6d_raw) >= 32 and abs(ret_6d_raw - taiex_ret_6d) >= 20: 
                 if (i - last_trigger["rule1"]) >= 6:
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第1款)")
+                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                     last_trigger["rule1"] = i
-                    rule1_hit_today = True
-
-        # --- 第10款：累積週轉率異常 ---
-        if total_sheets > 0:
-            vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
-            turnover_6d = (vol_6d_lots / total_sheets * 100) 
-            daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
-            daily_turnover = (daily_vol_lots / total_sheets * 100)
             
-            if turnover_6d >= 80 and daily_turnover >= 20: 
-                # 檢查冷卻期與排他條款：當日若已觸發第1款，或仍在6日冷卻期內，則強制不公布！
-                if not rule1_hit_today and (i - last_trigger["rule10"]) >= 6:
+            # --- 🔥 破解版 第4款：漲幅 + 週轉率 ---
+            if abs(ret_6d_raw) >= 25 and daily_turnover >= 10:
+                is_cooldown = (i - last_trigger["rule4"] < 6) or (i - last_trigger["rule10"] < 6)
+                # 突破冷卻期條件：當日週轉率必須高達 20% (完美解釋 5/28 通過而 5/25 被擋)
+                if not is_cooldown or (is_cooldown and daily_turnover >= 20):
+                    word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
+                    last_trigger["rule4"] = i
+
+            # --- 🔥 破解版 第10款：累積週轉率異常 ---
+            if turnover_6d >= 50 and daily_turnover >= 20: 
+                if (i - last_trigger["rule10"]) >= 6:
                     reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
                     last_trigger["rule10"] = i
 
@@ -148,8 +157,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets):
             daily_dt_pct = (day_dict[dt_str_curr]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
         
         if dt_pct_6d >= 60 and daily_dt_pct >= 60:
-            # 檢查冷卻期與排他條款
-            if not rule1_hit_today and (i - last_trigger["rule13"]) >= 6:
+            if (i - last_trigger["rule13"]) >= 6:
                 reasons.append(f"最近六個營業日(含當日)之當沖成交量占總成交量達{dt_pct_6d:.2f}%，當日當沖比達{daily_dt_pct:.2f}%(第十三款)")
                 last_trigger["rule13"] = i
 
@@ -230,7 +238,7 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在啟動含「冷卻期除外」之高精度推演引擎..."):
+with st.spinner("正在透過本地引擎嚴格推演量價風控模型..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
@@ -483,7 +491,7 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用掛載「冷卻排他系統」的終極引擎
+        # 🔥 調用嚴格包含冷卻期與大盤濾網的引擎
         df_notice = calculate_local_attention(df_price, df_day, df_taiex, total_sheets)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
