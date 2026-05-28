@@ -20,7 +20,7 @@ st.markdown("""
         background-color: #1e1e26; border-radius: 12px; padding: 25px; 
         margin-bottom: 15px; border: 1px solid #333; 
         box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
-        height: 220px; /* 強制相同高度 */
+        height: 180px; /* 強制相同高度 */
         display: flex; flex-direction: column; justify-content: center;
     }
     /* 下方十二宮格數據卡片專用 */
@@ -28,7 +28,7 @@ st.markdown("""
         background-color: #1e1e26; border-radius: 12px; padding: 20px; 
         margin-bottom: 15px; border: 1px solid #333; 
         box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
-        height: 140px; /* 強制相同高度，確保三排水平垂直完美對齊 */
+        height: 120px; /* 強制相同高度，確保三排水平垂直完美對齊 */
         display: flex; flex-direction: column; justify-content: center;
     }
     .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; font-weight: 500;}
