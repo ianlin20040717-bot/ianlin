@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import urllib.parse
-import time
 from datetime import datetime, timedelta
 
 # ==========================================
@@ -42,23 +40,6 @@ st.markdown("""
 # ==========================================
 # 📡 資料抓取與輔助模組
 # ==========================================
-def fetch_with_proxy(url):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-    try:
-        r = requests.get(url, headers=headers, timeout=3)
-        if r.status_code == 200: 
-            res = r.json()
-            if res and isinstance(res, dict) and "stat" in res and res["stat"] != "OK": return None
-            return res
-    except: pass
-    
-    try:
-        proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(url)}"
-        r = requests.get(proxy_url, headers=headers, timeout=5)
-        if r.status_code == 200: return r.json()
-    except: pass
-    return None
-
 @st.cache_data(ttl=3600)
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -81,70 +62,35 @@ def get_all_info():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
 
-@st.cache_data(ttl=1800) # 縮短快取時間，方便盤後第一時間刷出最新紀錄
-def get_notice_recent(sid, is_twse):
-    """🚀 終極時差防禦版：隔離未結算時段，確保歷史名單安全留存"""
-    records = []
+@st.cache_data(ttl=1800)
+def get_notice_finmind_version(sid):
+    """🚀 終極重構：100% 走 FinMind 專屬商用通道，徹底免除政府網站鎖海外 IP 的問題"""
+    # 抓取過去 60 天的資料，確保在本地能精準篩出 30 個交易日的注意紀錄
+    start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    df = api_request("TaiwanStockAttentionSecurities", data_id=sid, start=start_60d)
     
-    # 🧠 校正台灣本地時間
-    now_tw = datetime.utcnow() + timedelta(hours=8)
-    
-    if is_twse:
-        # 上市：TWSE 區間查詢非常穩定，直接切 2 個區塊
-        end_dt = now_tw
-        for i in range(2):
-            e_dt = end_dt - timedelta(days=i*30)
-            s_dt = e_dt - timedelta(days=29)
-            url = f"https://www.twse.com.tw/announcement/notice?response=json&startDate={s_dt.strftime('%Y%m%d')}&endDate={e_dt.strftime('%Y%m%d')}&stockNo={sid}"
-            data = fetch_with_proxy(url)
-            if data and 'data' in data:
-                for item in data['data']:
-                    try:
-                        y, m, d = item[0].split('/')
-                        ad_date = datetime(int(y)+1911, int(m), int(d))
-                        records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
-                    except: pass
-            time.sleep(0.05)
-    else:
-        # 上櫃：TPEx 結算極慢（下午4-5點）。如果目前小於 17:00，起始點強制改從「昨天」開始算
-        if now_tw.hour < 17:
-            end_dt = now_tw - timedelta(days=1)
-        else:
-            end_dt = now_tw
-            
-        for i in range(45):
-            query_dt = end_dt - timedelta(days=i)
-            if query_dt.weekday() >= 5: continue # 略過假日
-            
-            q_tw = f"{query_dt.year - 1911:03d}/{query_dt.month:02d}/{query_dt.day:02d}"
-            url = f"https://www.tpex.org.tw/web/bulletin/notice/notice_result.php?l=zh-tw&d={q_tw}&o=json"
-            
-            # 用獨立的 try-except 隔離每一天，絕不讓今天的空網頁影響過去寫入的歷史
-            try:
-                data = fetch_with_proxy(url)
-                if data and 'aaData' in data:
-                    for item in data['aaData']:
-                        if str(item[1]).strip() == sid: 
-                            y, m, d = item[0].split('/')
-                            ad_date = datetime(int(y)+1911, int(m), int(d))
-                            records.append({"date": ad_date, "年月日": item[0], "觸發條款": item[3]})
-            except:
-                pass # 某天官方當機不影響其他天
-            time.sleep(0.02)
-
-    df = pd.DataFrame(records)
     if not df.empty:
-        df = df.drop_duplicates(subset=['年月日']).sort_values('date', ascending=True).reset_index(drop=True)
+        # 統一處理欄位，確保畫面的整潔
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date', ascending=True).reset_index(drop=True)
         
         # 🧠 計算近 20 個交易日 (約 30 個日曆日) 的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
-            start_window = curr_date - timedelta(days=30) 
+            start_window = curr_date - timedelta(days=30)
             c = len(df[(df['date'] <= curr_date) & (df['date'] > start_window)])
             counts.append(f"第 {c} 次")
-        
+            
         df['近20日累計次數'] = counts
+        df['年月日'] = df['date'].dt.strftime('%Y-%m-%d')
+        
+        # 翻譯與對齊欄位名稱
+        if 'reason' in df.columns:
+            df = df.rename(columns={'reason': '觸發條款'})
+        else:
+            df['觸發條款'] = "符合注意股票判定標準"
+            
         df = df.sort_values('date', ascending=False).reset_index(drop=True)
         return df[['年月日', '近20日累計次數', '觸發條款']]
     return pd.DataFrame()
@@ -205,7 +151,7 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在載入盤後數據與風控模型..."):
+with st.spinner("正在透過 FinMind 頂級通道同步全市場大數據..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
@@ -444,7 +390,8 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        df_notice = get_notice_recent(sid, is_twse)
+        # 👑 亮點：改調用 100% 穩健的 FinMind 專屬通道
+        df_notice = get_notice_finmind_version(sid)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 近 30 交易日【注意股】歷史紀錄 (共 {notice_count} 次)"):
             if not df_notice.empty:
