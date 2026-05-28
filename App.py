@@ -62,58 +62,6 @@ def get_all_info():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
 
-@st.cache_data(ttl=600)
-def get_notice_finmind_version(sid):
-    """🚀 走 FinMind VIP 通道，並進行多重欄位安全攔截"""
-    start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockAttentionSecurities",
-        "stock_id": sid,
-        "start_date": start_60d,
-        "token": FINMIND_TOKEN
-    }
-    
-    try:
-        res = requests.get(url, params=params, timeout=10).json()
-        df = pd.DataFrame(res.get('data', []))
-    except:
-        return pd.DataFrame()
-    
-    if not df.empty:
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date', ascending=True).reset_index(drop=True)
-        
-        # 🧠 計算近 20 個交易日的累積次數
-        counts = []
-        for i in range(len(df)):
-            curr_date = df.loc[i, 'date']
-            start_window = curr_date - timedelta(days=30)
-            c = len(df[(df['date'] <= curr_date) & (df['date'] > start_window)])
-            counts.append(f"第 {c} 次")
-            
-        df['近20日累計次數'] = counts
-        df['年月日'] = df['date'].dt.strftime('%Y-%m-%d')
-        
-        # 🛡️ 安全攔截條款欄位名稱
-        if 'reason' in df.columns:
-            df = df.rename(columns={'reason': '觸發條款'})
-        elif 'notice_condition' in df.columns:
-            df = df.rename(columns={'notice_condition': '觸發條款'})
-        elif 'details' in df.columns:
-            df = df.rename(columns={'details': '觸發條款'})
-        else:
-            # 萬一遇到未知欄位，自動把非日期的第一個文字欄位當作條款
-            text_cols = [c for c in df.columns if c not in ['date', 'stock_id', '年月日', '近20日累計次數']]
-            if text_cols:
-                df = df.rename(columns={text_cols[0]: '觸發條款'})
-            else:
-                df['觸發條款'] = "符合注意股票判定標準"
-            
-        df = df.sort_values('date', ascending=False).reset_index(drop=True)
-        return df[['年月日', '近20日累計次數', '觸發條款']]
-    return pd.DataFrame()
-
 def extract_match_type(measure):
     m = str(measure)
     if any(k in m for k in ["九十分", "90分"]): return "90分盤"
@@ -123,9 +71,6 @@ def extract_match_type(measure):
     if any(k in m for k in ["二十分", "20分"]): return "20分盤"
     if any(k in m for k in ["十分", "10分"]): return "10分盤"
     if any(k in m for k in ["五分", "5分"]): return "5分盤"
-    if "第五次" in m: return "90分盤"
-    if "第四次" in m: return "60分盤"
-    if "第三次" in m: return "45分盤"
     if "第二次" in m: return "20分盤"
     if "第一次" in m: return "5分盤"
     return "5分盤"
@@ -169,30 +114,68 @@ is_twse = (info['market'] == 'twse')
 
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
+start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
 
-with st.spinner("正在透過 FinMind VIP 頂級通道同步全市場大數據..."):
+with st.spinner("正在透過 FinMind VIP 通道秒速解析量價與風控大數據..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
-    df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
+    # 🌟 核心破案關鍵：一網打盡近 60 天(30交易日) 的處置與注意原始大資料
+    df_raw_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
 
+# ----------------------------------------------
+# 🧠 核心分流引擎：從同一個資料集剝離「注意」與「處置」
+# ----------------------------------------------
+df_notice_final = pd.DataFrame()
+df_disp_final = pd.DataFrame()
+
+if not df_raw_disp.empty:
+    df_raw_disp['stock_id'] = df_raw_disp['stock_id'].astype(str).str.strip()
+    df_stock_data = df_raw_disp[df_raw_disp['stock_id'] == sid].copy()
+    
+    if not df_stock_data.empty:
+        # A. 處置股分流：條款內沒有寫「注意股票」，或是寫了措施
+        df_disp_raw = df_stock_data[~df_stock_data['measure'].str.contains("列為注意股票|注意股票", na=False)].copy()
+        if not df_disp_raw.empty:
+            df_disp_raw['盤別'] = df_disp_raw['measure'].apply(extract_match_type)
+            df_disp_final = df_disp_raw[['period_start', 'period_end', '盤別', 'measure']].rename(
+                columns={'period_start': '起始日', 'period_end': '結束日', 'measure': '條款與措施'}
+            ).sort_values('起始日', ascending=False)
+
+        # B. 注意股分流：只要條款內含有「注意股票」字眼，立刻歸類
+        df_notice_raw = df_stock_data[df_stock_data['measure'].str.contains("列為注意股票|注意股票", na=False)].copy()
+        if not df_notice_raw.empty:
+            df_notice_raw['date_dt'] = pd.to_datetime(df_notice_raw['period_start'])
+            df_notice_raw = df_notice_raw.sort_values('date_dt', ascending=True).reset_index(drop=True)
+            
+            # 🧠 直接在本地端回溯計算近 20 個交易日的累積次數
+            counts = []
+            for i in range(len(df_notice_raw)):
+                curr_date = df_notice_raw.loc[i, 'date_dt']
+                start_window = curr_date - timedelta(days=30)
+                c = len(df_notice_raw[(df_notice_raw['date_dt'] <= curr_date) & (df_notice_raw['date_dt'] > start_window)])
+                counts.append(f"第 {c} 次")
+                
+            df_notice_raw['近20日累計次數'] = counts
+            df_notice_raw['年月日'] = df_notice_raw['date_dt'].dt.strftime('%Y-%m-%d')
+            df_notice_final = df_notice_raw[['年月日', '近20日累計次數', 'measure']].rename(columns={'measure': '觸發條款'}).sort_values('年月日', ascending=False)
+
+# 判斷當前是否「正在處置中」
 is_punished = False
 disp_info = {}
-if not df_disp.empty and 'period_end' in df_disp.columns:
-    df_disp['stock_id'] = df_disp['stock_id'].astype(str).str.strip() 
-    df_disp['period_end_dt'] = pd.to_datetime(df_disp['period_end'])
-    active_disp = df_disp[(df_disp['stock_id'] == sid) & (df_disp['period_end_dt'] >= pd.Timestamp.today().normalize())]
-    if not active_disp.empty:
+if not df_disp_final.empty:
+    # 檢查最新的一筆處置其結束日期是否大於等於今天
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    latest_disp = df_disp_final.iloc[0]
+    if latest_disp['結束日'] >= today_str:
         is_punished = True
-        latest = active_disp.sort_values('period_end_dt').iloc[-1]
-        measure = latest['measure']
         disp_info = {
-            "period": f"{latest['period_start']} ~ {latest['period_end']}", 
-            "measure": measure, 
-            "match": extract_match_type(measure) 
+            "period": f"{latest_disp['起始日']} ~ {latest_disp['結束日']}",
+            "match": latest_disp['盤別']
         }
 
+# 計算收盤價與基本數據
 if not df_price.empty:
     df_price['date'] = pd.to_datetime(df_price['date'])
     df_price = df_price.set_index('date').sort_index()
@@ -233,16 +216,9 @@ market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
 
-# 🛡️ 終極修正：動態欄位安全檢查，絕不允許 KeyError 再次發生
 if not df_day.empty:
-    # 尋找包含 Volume 或 volume 關鍵字的欄位，若找不到則直接抓非日期的數值欄位最大值
     vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
-    if vol_cols:
-        history_can_day = df_day[vol_cols[0]].max() > 0
-    else:
-        # 最強保險絲：直接看排除日期以外的第一個欄位有沒有大於 0
-        valid_cols = [c for c in df_day.columns if c not in ['date', 'stock_id']]
-        history_can_day = df_day[valid_cols[0]].max() > 0 if valid_cols else True
+    history_can_day = df_day[vol_cols[0]].max() > 0 if vol_cols else True
 else:
     history_can_day = False
 
@@ -290,7 +266,7 @@ if not df_price.empty:
             html_content = (
                 '<div class="card-container">'
                 '<div class="metric-label">風險預測</div>'
-                f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中</div>'
+                f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中 ({disp_info["match"]})</div>'
                 f'<div class="metric-sub">處置期間：{disp_info["period"]}</div>'
                 f'<div class="metric-sub" style="color:#888; margin-top:8px;">(處置期間無須計算周轉率紅線)</div>'
                 '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
@@ -345,41 +321,29 @@ if not df_price.empty:
         c.markdown(card_html, unsafe_allow_html=True)
 
     col_r1 = st.columns(4)
-    vol_lots = today_vol / 1000 
-    turnover = (today_vol / vols.mean()) if vols.mean() > 0 else 0
+    m_card(col_r1[0], "成交張數", f"{vol_lots:,.0f} 張", sub=f"({price_date_str})")
+    m_card(col_r1[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億", sub=f"({price_date_str})")
+    m_card(col_r1[2], "週轉率", f"{turnover:.2f} 倍", sub="相對於均量")
+    
     short_ratio, margin_date_sub = 0, ""
     if not df_margin.empty and 'MarginPurchaseTodayBalance' in df_margin.columns:
         last_margin_row = df_margin.iloc[-1]
         margin_date_sub = f"({pd.to_datetime(last_margin_row['date']).strftime('%m/%d')})"
-        margin_bal = last_margin_row['MarginPurchaseTodayBalance']
-        short_bal = last_margin_row.get('ShortSaleTodayBalance', 0)
-        short_ratio = (short_bal / margin_bal * 100) if margin_bal > 0 else 0
-
-    m_card(col_r1[0], "成交張數", f"{vol_lots:,.0f} 張", sub=f"({price_date_str})")
-    m_card(col_r1[1], "成交金額", f"{(p_now * today_vol)/100000000:.1f} 億", sub=f"({price_date_str})")
-    m_card(col_r1[2], "週轉率", f"{turnover:.2f} 倍", sub="相對於均量")
+        short_ratio = (last_margin_row.get('ShortSaleTodayBalance', 0) / last_margin_row['MarginPurchaseTodayBalance'] * 100) if last_margin_row['MarginPurchaseTodayBalance'] > 0 else 0
     m_card(col_r1[3], "券資比", f"{short_ratio:.1f}%", sub=margin_date_sub)
 
     col_r2 = st.columns(4)
     day_pct, day_vol_lots, day_date_sub = 0, 0, ""
     if not df_day.empty:
-        # 當沖率與當沖成交量動態配對
         day_vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
         day_pct_cols = [c for c in df_day.columns if 'percent' in c.lower() or 'ratio' in c.lower()]
-        
         last_day_row = df_day.iloc[-1]
         day_date_sub = f"({pd.to_datetime(last_day_row['date']).strftime('%m/%d')})"
-        
         day_trade_vol = last_day_row[day_vol_cols[0]] if day_vol_cols else 0
-        day_vol_lots = day_trade_vol / 1000 if day_trade_vol > 100 else day_trade_vol # 防呆張數與股數單位
-        
+        day_vol_lots = day_trade_vol / 1000 if day_trade_vol > 100 else day_trade_vol
         if day_pct_cols:
             day_pct = last_day_row[day_pct_cols[0]]
             if day_pct < 1: day_pct *= 100
-        else:
-            match_price = df_price[df_price.index == pd.to_datetime(last_day_row['date'])]
-            match_vol = match_price['Trading_Volume'].iloc[0] if not match_price.empty else 0
-            day_pct = (day_trade_vol / match_vol) * 100 if match_vol > 0 else 0
 
     m_card(col_r2[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518", sub=day_date_sub)
     m_card(col_r2[1], "當沖獲利", "N/A", clr="#555")       
@@ -394,14 +358,11 @@ if not df_price.empty:
         inst_date_sub = f"({pd.to_datetime(last_inst_date).strftime('%m/%d')})"
         daily_inst = df_inst[df_inst['date'] == last_inst_date]
         inst_net = daily_inst.groupby('name')['buy'].sum() - daily_inst.groupby('name')['sell'].sum()
-        
         match_price = df_price[df_price.index == pd.to_datetime(last_inst_date)]
         target_price = match_price['close'].iloc[0] if not match_price.empty else p_now
-        
         f_shares = inst_net.get('Foreign_Investor', 0) + inst_net.get('Foreign_Dealer_Self', 0)
         t_shares = inst_net.get('Investment_Trust', 0)
         d_shares = inst_net.get('Dealer_self', 0) + inst_net.get('Dealer_Hedging', 0)
-        
         f_amt = f_shares * target_price
         t_amt = t_shares * target_price
         d_amt = d_shares * target_price
@@ -411,10 +372,8 @@ if not df_price.empty:
         if val == 0: return "0", "white"
         sign = "+" if val > 0 else ""
         clr = "#ff4b4b" if val > 0 else "#00ff00" 
-        if abs(val) >= 100000000:
-            return f"{sign}{val/100000000:.2f} 億", clr
-        else:
-            return f"{sign}{val/10000:,.0f} 萬", clr
+        if abs(val) >= 100000000: return f"{sign}{val/100000000:.2f} 億", clr
+        else: return f"{sign}{val/10000:,.0f} 萬", clr
 
     total_str, total_clr = format_inst_amt(total_amt)
     f_str, f_clr = format_inst_amt(f_amt)
@@ -426,26 +385,25 @@ if not df_price.empty:
     m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr, sub=inst_date_sub)
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
+    # ==========================================
+    # 📜 對稱雙塔：近 30 交易日分流結果渲染
+    # ==========================================
     st.markdown("---")
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        df_notice = get_notice_finmind_version(sid)
-        notice_count = len(df_notice) if not df_notice.empty else 0
+        notice_count = len(df_notice_final) if not df_notice_final.empty else 0
         with st.expander(f"📜 近 30 交易日【注意股】歷史紀錄 (共 {notice_count} 次)"):
-            if not df_notice.empty:
-                st.dataframe(df_notice, hide_index=True, use_container_width=True)
+            if not df_notice_final.empty:
+                st.dataframe(df_notice_final, hide_index=True, use_container_width=True)
             else: 
                 st.write("近 30 交易日內無注意紀錄")
                 
     with h_col2:
-        start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-        h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
-        with st.expander(f"🛑 近 30 交易日【處置股】歷史紀錄 (共 {len(h_df) if not h_df.empty else 0} 次)"):
-            if not h_df.empty:
-                h_df['盤別'] = h_df['measure'].apply(extract_match_type)
-                h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
-                st.dataframe(h_df.rename(columns={'period_start':'起始日', 'period_end':'結束日', 'measure':'條款與措施'}), hide_index=True, use_container_width=True)
+        disp_count = len(df_disp_final) if not df_disp_final.empty else 0
+        with st.expander(f"🛑 近 30 交易日【處置股】歷史紀錄 (共 {disp_count} 次)"):
+            if not df_disp_final.empty:
+                st.dataframe(df_disp_final, hide_index=True, use_container_width=True)
             else: 
                 st.write("近 30 交易日內無處置紀錄")
 
