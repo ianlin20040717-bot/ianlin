@@ -63,26 +63,15 @@ def get_all_info():
     return mapping
 
 # ==========================================
-# 🧠 霸氣自研：本地端法規判定引擎 2.0 (精準版)
+# 🧠 霸氣自研：本地端法規判定引擎 3.0 (絕對法規版)
 # ==========================================
-def calculate_local_attention(df_price, df_day, df_margin):
-    """加入法規複合條件與單位自動校正，徹底解決警報狂刷與數字爆炸問題"""
+def calculate_local_attention(df_price, df_day):
+    """屏除錯誤的週轉率猜測，回歸證交所真正的量價與當沖天條"""
     records = []
     if df_price.empty or len(df_price) < 6:
         return pd.DataFrame()
 
-    # 1. 🛡️ 單位智能對齊：取得總發行張數
-    total_sheets = 0
-    if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
-        limit = df_margin['MarginPurchaseLimit'].max()
-        if pd.notna(limit) and limit > 0:
-            # 判斷 FinMind 是給「股」還是「張」
-            if limit < 1000000: 
-                total_sheets = limit * 4 # 單位為張，不除1000
-            else: 
-                total_sheets = (limit * 4) / 1000 # 單位為股，換算為張
-
-    # 2. 建立當沖字典提升比對速度
+    # 1. 建立當沖字典提升比對速度
     day_dict = {}
     if not df_day.empty:
         vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
@@ -94,44 +83,57 @@ def calculate_local_attention(df_price, df_day, df_margin):
             if dt_pct < 1 and dt_pct > 0: dt_pct *= 100
             day_dict[dt_str] = {'vol': dt_vol, 'pct': dt_pct}
 
-    # 3. 掃描近 30 個交易日，執行嚴格複合條件推演
+    # 2. 掃描近 30 個交易日，執行嚴格的法規複合條件推演
     scan_range = min(30, len(df_price) - 5)
     for i in range(len(df_price) - scan_range, len(df_price)):
         curr_date = df_price.index[i]
         c_close = df_price['close'].iloc[i]
-        p_close = df_price['close'].iloc[i-5] 
-        p_yest = df_price['close'].iloc[i-1]
-
-        # 每日漲幅與 6日漲幅
-        daily_ret = abs((c_close / p_yest) - 1) * 100 if p_yest > 0 else 0
+        p_close = df_price['close'].iloc[i-5] # 6日前收盤價
+        
+        # --- 法規條件 A：短期漲跌幅異常 ---
         ret_6d = abs((c_close / p_close) - 1) * 100 if p_close > 0 else 0
-
-        # 週轉率計算
-        vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
-        turnover_6d = (vol_6d_lots / total_sheets * 100) if total_sheets > 0 else 0
-
-        # 當沖率計算
-        dt_str = curr_date.strftime('%Y-%m-%d')
-        day_pct = day_dict.get(dt_str, {}).get('pct', 0)
-        if day_pct == 0 and day_dict.get(dt_str, {}).get('vol', 0) > 0:
+        
+        # --- 法規條件 B：成交量異常放大 (取代週轉率) ---
+        vol_expansion_flag = False
+        if i >= 59:
+            avg_vol_60d = df_price['Trading_Volume'].iloc[i-59:i+1].mean()
+            avg_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].mean()
             daily_vol = df_price['Trading_Volume'].iloc[i]
-            day_pct = (day_dict[dt_str]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
+            
+            # 條件：6日均量較60日大5倍，且單日較60日大5倍
+            if avg_vol_60d > 0:
+                if (avg_vol_6d / avg_vol_60d) >= 5 and (daily_vol / avg_vol_60d) >= 5:
+                    vol_expansion_flag = True
 
-        # 🛡️ 法規天條：必須搭配價格異常條件
+        # --- 法規條件 C：當沖異常 ---
+        day_trade_flag = False
+        total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
+        
+        # 計算過去6天累積當沖量
+        dt_vol_6d = 0
+        for j in range(i-5, i+1):
+            date_key = df_price.index[j].strftime('%Y-%m-%d')
+            dt_vol_6d += day_dict.get(date_key, {}).get('vol', 0)
+            
+        dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
+        
+        dt_str = curr_date.strftime('%Y-%m-%d')
+        daily_dt_pct = day_dict.get(dt_str, {}).get('pct', 0)
+        
+        # 條件：6日累積當沖大於60%，且單日當沖大於60%
+        if dt_pct_6d >= 60 and daily_dt_pct >= 60:
+            day_trade_flag = True
+
+        # --- 判斷觸發天條 ---
         reasons = []
-        # 條件 A：單純漲勢過猛
         if ret_6d >= 25: 
             reasons.append(f"6日累積漲跌幅達 {ret_6d:.1f}%")
-        
-        # 條件 B：週轉爆量「且」股價有明顯波動
-        if turnover_6d >= 50 and ret_6d >= 15: 
-            reasons.append(f"6日週轉率達 {turnover_6d:.1f}% 且累積漲幅達標")
-            
-        # 條件 C：當沖異常「且」當日股價有明顯波動
-        if day_pct >= 60 and daily_ret >= 3: 
-            reasons.append(f"當沖比率達 {day_pct:.1f}% 且當日波動異常")
+        if vol_expansion_flag: 
+            reasons.append(f"成交量異常放大(大於60日均量5倍)")
+        if day_trade_flag: 
+            reasons.append(f"6日與單日當沖占比皆逾 60%")
 
-        # 條件 D：長線暴衝
+        # --- 法規條件 D：長線暴衝 ---
         if i >= 29:
             p30 = df_price['close'].iloc[i-29]
             if p30 > 0 and (c_close / p30 - 1) >= 1.0: reasons.append("30日漲幅>100%")
@@ -260,28 +262,18 @@ else:
     p_now, today_vol, price_date_str = 0, 0, ""
 
 # ------------------------------
-# 🚀 量能與周轉率倒推模型
+# 🚀 取代舊有錯誤：爆量警戒倒推模型
 # ------------------------------
-total_sheets = 0
-if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
-    limit = df_margin['MarginPurchaseLimit'].max()
-    if pd.notna(limit) and limit > 0:
-        if limit < 1000000:
-            total_sheets = limit * 4
-        else:
-            total_sheets = (limit * 4) / 1000
-
 turnover_warn_str = ""
-if total_sheets > 0 and not df_price.empty and len(closes) >= 5:
-    vols_5d_lots = vols.tail(5).sum() / 1000
-    threshold_50_pct = total_sheets * 0.5
-    turnover_warn_volume = threshold_50_pct - vols_5d_lots
-    if turnover_warn_volume <= 0:
-        turnover_warn_str = "⚠️ 已達 50% 警戒，任何放量皆可能觸發"
+if not df_price.empty and len(closes) >= 60:
+    avg_vol_60d_lots = vols.tail(60).mean() / 1000
+    warn_volume = avg_vol_60d_lots * 5 # 法規：較60日均量放大5倍
+    if warn_volume > 0:
+        turnover_warn_str = f"約 {warn_volume:,.0f} 張"
     else:
-        turnover_warn_str = f"約 {turnover_warn_volume:,.0f} 張"
+        turnover_warn_str = "均量過低無法估算"
 else:
-    turnover_warn_str = "無法估算 (無資券限額資料)"
+    turnover_warn_str = "無法估算 (資料未滿60日)"
 
 market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
@@ -343,7 +335,7 @@ if not df_price.empty:
                 '<div class="metric-label">風險預測</div>'
                 f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中 ({disp_info["match"]})</div>'
                 f'<div class="metric-sub">處置期間：{disp_info["period"]}</div>'
-                f'<div class="metric-sub" style="color:#888; margin-top:8px;">(處置期間無須計算周轉率紅線)</div>'
+                f'<div class="metric-sub" style="color:#888; margin-top:8px;">(處置期間無須計算量能紅線)</div>'
                 '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                 '<div style="width:100%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                 '</div></div>'
@@ -366,7 +358,7 @@ if not df_price.empty:
                     '<div class="metric-label">風險預測</div>'
                     f'<div class="metric-value" style="color:#ffc107;">🔥 最快 {d} 天內進入處置 (或再次處置)</div>'
                     f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 處置預估觸發價：{p:.2f}</div>'
-                    f'<div class="metric-sub" style="color:#ff4b4b; margin-top:8px;">🚨 6日/50% 週轉率爆量警戒：{turnover_warn_str}</div>'
+                    f'<div class="metric-sub" style="color:#ff4b4b; margin-top:8px;">🚨 異常爆量警戒(60日均量5倍)：{turnover_warn_str}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     f'<div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -378,7 +370,7 @@ if not df_price.empty:
                     '<div class="metric-label">風險預測</div>'
                     '<div class="metric-value" style="color:#00ff00;">✅ 短期內無處置風險</div>'
                     f'<div class="metric-sub">明日注意門檻：{p_warn:.2f} ｜ 連拉10根漲停亦安全</div>'
-                    f'<div class="metric-sub" style="color:#f5c518; margin-top:8px;">📊 6日/50% 週轉率爆量警戒：{turnover_warn_str}</div>'
+                    f'<div class="metric-sub" style="color:#f5c518; margin-top:8px;">📊 異常爆量警戒(60日均量5倍)：{turnover_warn_str}</div>'
                     '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                     '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
                     '</div></div>'
@@ -480,14 +472,14 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用我們嚴密把關的本地法規計算引擎
-        df_notice = calculate_local_attention(df_price, df_day, df_margin)
+        # 🔥 調用嚴格法規過濾的引擎
+        df_notice = calculate_local_attention(df_price, df_day)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
             if not df_notice.empty:
                 st.dataframe(df_notice, hide_index=True, use_container_width=True)
             else: 
-                st.write("近 30 交易日內未觸發系統注意標準")
+                st.write("近 30 交易日內未觸發系統嚴格注意標準")
                 
     with h_col2:
         start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
