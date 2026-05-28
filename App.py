@@ -58,7 +58,7 @@ def get_all_info():
     return mapping
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (嚴格遵守異常標準詳細數據)
+# 🧠 核心：本地端法規判定引擎 (嚴格落實法規第4條)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
     records = []
@@ -100,7 +100,7 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
         reasons = []
         dt_str_curr = curr_date.strftime('%Y-%m-%d')
 
-        # --- 第1款：累積漲跌幅異常 (需比較大盤) ---
+        # --- 第1款：累積漲跌幅異常 (強制要求偏離大盤) [cite: 1] ---
         if i >= 6:
             p_close_6 = df_price['close'].iloc[i-6]
             ret_6d = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
@@ -110,11 +110,10 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
             taiex_p6 = taiex_dict.get(dt_str_p6, 0)
             taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
             
-            # 法規詳細數據：絕對漲跌幅 >= 25% 且 偏離大盤 >= 20%
             if abs(ret_6d) >= 25 and abs(ret_6d - taiex_ret_6d) >= 20: 
                 reasons.append(f"第1款：6日漲跌幅達 {abs(ret_6d):.1f}% (偏離大盤)")
         
-        # --- 第10款：累積週轉率異常 ---
+        # --- 第10款：累積週轉率明顯過高 (獨立判定，不看價格) [cite: 1] ---
         if total_sheets > 0:
             vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
             turnover_6d = (vol_6d_lots / total_sheets * 100) 
@@ -122,11 +121,10 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
             daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
             daily_turnover = (daily_vol_lots / total_sheets * 100)
             
-            # 法規詳細數據：6日累積 >= 50% 且 當日 >= 20% (依據使用者回饋參數微調)
-            if turnover_6d >= 50 and daily_turnover >= 20: 
+            if turnover_6d >= 50 and daily_turnover >= 10: 
                 reasons.append(f"第10款：6日週轉率 {turnover_6d:.1f}%，當日 {daily_turnover:.1f}%")
 
-        # --- 第13款：當沖異常 ---
+        # --- 第13款：當沖成交量占總成交量比率過高 (獨立判定，不看價格) [cite: 1] ---
         total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
         dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
         dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
@@ -136,7 +134,6 @@ def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
             daily_vol = df_price['Trading_Volume'].iloc[i]
             daily_dt_pct = (day_dict[dt_str_curr]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
         
-        # 法規詳細數據：6日當沖占比 >= 60% 且 當日當沖占比 >= 60%
         if dt_pct_6d >= 60 and daily_dt_pct >= 60:
             reasons.append(f"第13款：6日當沖率 {dt_pct_6d:.1f}%，當日 {daily_dt_pct:.1f}%")
 
@@ -480,7 +477,7 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用嚴格包含大盤與當日條件的法規計算引擎
+        # 🔥 調用嚴格包含大盤與當日獨立條件的法規計算引擎
         df_notice = calculate_local_attention(df_price, df_day, df_margin, df_taiex)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
