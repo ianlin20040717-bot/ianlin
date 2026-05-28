@@ -40,7 +40,6 @@ st.markdown("""
 # ==========================================
 # 📡 資料抓取與輔助模組
 # ==========================================
-@st.cache_data(ttl=3600)
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {"dataset": dataset, "token": token}
@@ -62,19 +61,31 @@ def get_all_info():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=600) # 盤後盯盤抓資料快取縮短到10分鐘
 def get_notice_finmind_version(sid):
-    """🚀 終極重構：100% 走 FinMind 專屬商用通道，徹底免除政府網站鎖海外 IP 的問題"""
-    # 抓取過去 60 天的資料，確保在本地能精準篩出 30 個交易日的注意紀錄
+    """🚀 終極修正：對應 FinMind 真正的注意股 Schema (使用 stock_id 參數過濾)"""
     start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-    df = api_request("TaiwanStockAttentionSecurities", data_id=sid, start=start_60d)
+    
+    # 💡 核心修正：FinMind 的注意股 API 的過濾參數是 stock_id，而非 data_id
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockAttentionSecurities",
+        "stock_id": sid,
+        "start_date": start_60d,
+        "token": FINMIND_TOKEN
+    }
+    
+    try:
+        res = requests.get(url, params=params, timeout=10).json()
+        df = pd.DataFrame(res.get('data', []))
+    except:
+        return pd.DataFrame()
     
     if not df.empty:
-        # 統一處理欄位，確保畫面的整潔
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values('date', ascending=True).reset_index(drop=True)
         
-        # 🧠 計算近 20 個交易日 (約 30 個日曆日) 的累積次數
+        # 🧠 記憶體直接計算：近 20 個交易日 (約 30 個日曆日) 的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -85,9 +96,11 @@ def get_notice_finmind_version(sid):
         df['近20日累計次數'] = counts
         df['年月日'] = df['date'].dt.strftime('%Y-%m-%d')
         
-        # 翻譯與對齊欄位名稱
+        # 動態相容 FinMind 欄位命名規則 (reason 或 notice_condition 皆能攔截)
         if 'reason' in df.columns:
             df = df.rename(columns={'reason': '觸發條款'})
+        elif 'notice_condition' in df.columns:
+            df = df.rename(columns={'notice_condition': '觸發條款'})
         else:
             df['觸發條款'] = "符合注意股票判定標準"
             
@@ -151,7 +164,7 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在透過 FinMind 頂級通道同步全市場大數據..."):
+with st.spinner("正在透過 FinMind VIP 頂級通道同步全市場大數據..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
@@ -213,7 +226,7 @@ else:
 market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
-history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns else False
+history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty charges else False
 is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
@@ -390,7 +403,7 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 👑 亮點：改調用 100% 穩健的 FinMind 專屬通道
+        # 🔥 關鍵決戰點：改用對齊 FinMind 規格的過濾函數
         df_notice = get_notice_finmind_version(sid)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 近 30 交易日【注意股】歷史紀錄 (共 {notice_count} 次)"):
