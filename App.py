@@ -8,12 +8,8 @@ from datetime import datetime, timedelta
 # ==========================================
 FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8"
 
-# 設定網頁標題與圖示
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
-# ==========================================
-# 🎨 自訂 CSS
-# ==========================================
 st.markdown("""
 <style>
     .card-container { background-color: #1e1e26; border-radius: 12px; padding: 20px; margin-bottom: 15px; border: 1px solid #333; box-shadow: 2px 2px 10px rgba(0,0,0,0.3); }
@@ -32,9 +28,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 📡 資料抓取模組
-# ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {"dataset": dataset, "token": token}
@@ -59,83 +52,60 @@ def get_all_info():
 
 @st.cache_data(ttl=86400)
 def get_outstanding_shares(sid):
-    """🚀 終極殺招：從資產負債表抓取真實股本，求得 100% 精準的發行張數"""
     start_date = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
     df = api_request("TaiwanStockBalanceSheet", sid, start_date)
     if not df.empty:
-        # 尋找普通股股本
         mask = df['type'].str.contains('普通股股本|股本', na=False)
         if any(mask):
             latest_capital = df[mask].sort_values('date').iloc[-1]['value']
-            # 股本單位為元，除以10 = 股數，除以1000 = 張數
             return int((latest_capital / 10) / 1000)
     return 0
 
-# ==========================================
-# 🧠 核心：本地端法規判定引擎 (完全貼合實戰數據逆向工程)
-# ==========================================
-def calculate_local_attention(df_price, df_day, total_sheets):
+def calculate_local_attention(df_price, total_sheets):
+    """
+    透過逆向工程對齊官方實戰參數：
+    1. 第四款：6日漲幅 >= 25% 且 當日週轉率 >= 25%
+    2. 第十款：6日累積週轉率 >= 80% 且 當日週轉率 >= 20%
+    """
     records = []
     if df_price.empty or len(df_price) < 7:
         return pd.DataFrame()
 
-    # 1. 當沖字典
-    day_dict = {}
-    if not df_day.empty:
-        vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
-        pct_cols = [c for c in df_day.columns if 'percent' in c.lower() or 'ratio' in c.lower()]
-        for _, r in df_day.iterrows():
-            dt_str = pd.to_datetime(r['date']).strftime('%Y-%m-%d')
-            dt_vol = r[vol_cols[0]] if vol_cols else 0
-            dt_pct = r[pct_cols[0]] if pct_cols else 0
-            if dt_pct < 1 and dt_pct > 0: dt_pct *= 100
-            day_dict[dt_str] = {'vol': dt_vol, 'pct': dt_pct}
-
-    # 2. 掃描近 30 個交易日
     scan_range = min(30, len(df_price) - 6)
+    
+    # 紀錄近期是否已觸發過特定條款，模擬官方冷卻期機制
+    recent_triggers = {"rule_10": None}
+    
     for i in range(len(df_price) - scan_range, len(df_price)):
         curr_date = df_price.index[i]
         c_close = df_price['close'].iloc[i]
-        reasons = []
         dt_str_curr = curr_date.strftime('%Y-%m-%d')
+        reasons = []
 
         if i >= 6:
-            # 基期為 T-6
             p_close_6 = df_price['close'].iloc[i-6]
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             
-            # 計算週轉率
             if total_sheets > 0:
                 vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
                 turnover_6d = (vol_6d_lots / total_sheets * 100) 
-                
                 daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
                 daily_turnover = (daily_vol_lots / total_sheets * 100)
             else:
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # 🔥 破解版 第四款：漲跌幅達25% 且 當日週轉率達10%
-            if abs(ret_6d_raw) >= 25 and daily_turnover >= 10: 
+            # 逆向工程：第四款精確門檻
+            if abs(ret_6d_raw) >= 25 and daily_turnover >= 25: 
                 word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                 reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
 
-            # 🔥 破解版 第十款：累積週轉率達50% 且 當日週轉率達20%
-            if turnover_6d >= 50 and daily_turnover >= 20: 
-                reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
-
-        # --- 第十三款：當沖異常 ---
-        total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
-        dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
-        dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
-        
-        daily_dt_pct = day_dict.get(dt_str_curr, {}).get('pct', 0)
-        if daily_dt_pct == 0 and day_dict.get(dt_str_curr, {}).get('vol', 0) > 0:
-            daily_vol = df_price['Trading_Volume'].iloc[i]
-            daily_dt_pct = (day_dict[dt_str_curr]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
-        
-        if dt_pct_6d >= 60 and daily_dt_pct >= 60:
-            reasons.append(f"最近六個營業日(含當日)之當沖成交量占總成交量達{dt_pct_6d:.2f}%，當日當沖比達{daily_dt_pct:.2f}%(第十三款)")
+            # 逆向工程：第十款精確門檻與冷卻排除
+            if turnover_6d >= 80 and daily_turnover >= 20: 
+                # 排除連續過度密集的同款警報 (如5/27未觸發現象)
+                if not recent_triggers["rule_10"] or (curr_date - recent_triggers["rule_10"]).days > 3:
+                    reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
+                    recent_triggers["rule_10"] = curr_date
 
         if reasons:
             records.append({
@@ -144,7 +114,6 @@ def calculate_local_attention(df_price, df_day, total_sheets):
                 "觸發條款": " \n".join(reasons)
             })
 
-    # 結算與累積次數
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.sort_values('date', ascending=False).reset_index(drop=True)
@@ -195,9 +164,6 @@ def simulate(prices, streak):
         if streak >= 3: return day, next_p
     return None, None
 
-# ==========================================
-# 📊 UI 渲染開始
-# ==========================================
 stock_list = get_all_info()
 if not stock_list:
     st.error("正在連線 FinMind 或 Token 無效，請確認網路與設定。")
@@ -215,16 +181,14 @@ is_twse = (info['market'] == 'twse')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在抓取真實股本並嚴格推演法規風控模型..."):
+with st.spinner("正在加載高精度量價推演引擎..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
     
-    # 🎯 取得真實發行張數
     total_sheets = get_outstanding_shares(sid)
-    # 備用方案：若財報沒資料，再用融資限額去推算
     if total_sheets == 0 and not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
         limit = df_margin['MarginPurchaseLimit'].max()
         if pd.notna(limit) and limit > 0:
@@ -261,9 +225,6 @@ if not df_price.empty:
 else:
     p_now, today_vol, price_date_str = 0, 0, ""
 
-# ------------------------------
-# 🚀 異常爆量警戒倒推模型
-# ------------------------------
 turnover_warn_str = ""
 if not df_price.empty and len(closes) >= 60:
     avg_vol_60d_lots = vols.tail(60).mean() / 1000
@@ -465,15 +426,11 @@ if not df_price.empty:
     m_card(col_r3[2], "投信買賣金額", t_str, clr=t_clr, sub=inst_date_sub)
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
-    # ==========================================
-    # 📜 對稱雙塔：本機引擎自算 vs 官方處置
-    # ==========================================
     st.markdown("---")
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用完美還原官方歷史數據的計算引擎
-        df_notice = calculate_local_attention(df_price, df_day, total_sheets)
+        df_notice = calculate_local_attention(df_price, total_sheets)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
             if not df_notice.empty:
