@@ -11,7 +11,7 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
 # ==========================================
-# 🎨 專業版自訂 CSS (結合漲跌停底色與橫幅)
+# 🎨 專業版自訂 CSS
 # ==========================================
 st.markdown("""
 <style>
@@ -105,7 +105,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (新增第三款、第四款15%閥值)
+# 🧠 核心：本地端法規判定引擎 (大盤偏離率覆蓋版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -130,9 +130,11 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
-    # 官方防呆系統：紀錄上一次觸發的 Index (第10、11、13款適用6日冷卻期)
+    # 🛡️ 官方 6 日冷卻陣列
     last_trigger = {
         "rule1": -999,
+        "rule3": -999,
+        "rule4": -999,
         "rule10": -999,
         "rule11": -999,
         "rule13": -999
@@ -152,6 +154,12 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             diff_5d = c_close - p_close_5
             
+            # 計算大盤偏離率 (作為價格異常的過濾器)
+            dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
+            taiex_c = taiex_dict.get(dt_str_curr, 0)
+            taiex_p6 = taiex_dict.get(dt_str_p6, 0)
+            taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
+            
             if total_sheets > 0:
                 vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
                 turnover_6d = (vol_6d_lots / total_sheets * 100) 
@@ -161,13 +169,12 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
+            # 定義法規通用的「漲幅異常」底層濾網 (含偏離大盤20%)
+            is_price_abnormal = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
+
             # --- 第一款：純價格極端異常 ---
             if is_twse:
-                dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
-                taiex_c = taiex_dict.get(dt_str_curr, 0)
-                taiex_p6 = taiex_dict.get(dt_str_p6, 0)
-                taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
-                if abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20: 
+                if is_price_abnormal: 
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                         reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
@@ -184,17 +191,26 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
                 daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
                 vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
-                # 實戰門檻：漲跌幅達25% 且成交量較60日均量放大5倍以上
-                if abs(ret_6d_raw) >= 25 and vol_ratio >= 5:
-                    word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
+                
+                # 實戰門檻：漲跌幅達25% 且與大盤差幅達20% 且成交量放大5倍
+                if is_price_abnormal and vol_ratio >= 5:
+                    if (i - last_trigger["rule3"]) >= 6:
+                        word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                        reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
+                        last_trigger["rule3"] = i
             
-            # --- 🔥 第四款：價格 + 週轉率 (完美 15% 門檻) ---
-            if abs(ret_6d_raw) >= 25 and daily_turnover >= 15:
-                word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                reasons.append(f"當日週轉率達{daily_turnover:.1f}%(第四款)" if "第三款" in "".join(reasons) else f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
+            # --- 🔥 第四款：價格 + 週轉率 (15% 門檻) ---
+            if is_price_abnormal and daily_turnover >= 15:
+                if (i - last_trigger["rule4"]) >= 6:
+                    word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                    # 若已公告第三款，第四款的字眼會接在後面
+                    if any("第三款" in r for r in reasons):
+                        reasons.append(f"當日週轉率達{daily_turnover:.1f}%(第四款)")
+                    else:
+                        reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
+                    last_trigger["rule4"] = i
 
-            # --- 第十款：累積週轉率異常 (80% / 20% 門檻) ---
+            # --- 第十款：累積週轉率異常 ---
             if turnover_6d >= 80 and daily_turnover >= 20: 
                 if (i - last_trigger["rule10"]) >= 6:
                     reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
@@ -235,8 +251,21 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 reasons.append(f"最近六個營業日(含當日)之當沖成交量占總成交量達{dt_pct_6d:.2f}%，當日當沖比達{daily_dt_pct:.2f}%(第十三款)")
                 last_trigger["rule13"] = i
 
-        unique_reasons = list(dict.fromkeys(reasons))
-        if unique_reasons:
+        # 字串整合與清理
+        if reasons:
+            # 如果第三款和第四款同時存在，將它們合併在同一行以符合官方排版
+            final_reasons = []
+            has_rule3_and_4 = any("(第三款)" in r for r in reasons) and any("(第四款)" in r for r in reasons)
+            for r in reasons:
+                if has_rule3_and_4 and "(第四款)" in r:
+                    continue
+                if has_rule3_and_4 and "(第三款)" in r:
+                    r4 = next(x for x in reasons if "(第四款)" in x)
+                    final_reasons.append(f"{r} {r4}")
+                else:
+                    final_reasons.append(r)
+            
+            unique_reasons = list(dict.fromkeys(final_reasons))
             records.append({
                 "date": curr_date,
                 "年月日": dt_str_curr,
