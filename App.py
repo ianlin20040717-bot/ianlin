@@ -113,26 +113,42 @@ def calculate_local_attention(df_price, df_day, total_sheets):
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # --- 第1款：純價格極端異常 (提高門檻至30%過濾假警報) ---
+            # --- 第1款：純價格極端異常 ---
             if abs(ret_6d_raw) >= 30: 
                 if (i - last_trigger["rule1"]) >= 6:
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                     last_trigger["rule1"] = i
             
-            # --- 🔥 第4款：價格 + 週轉率雙重鎖定 ---
-            # 過濾 5/11 與 5/25 的低週轉率，精準命中 5/28
+            # --- 第4款：價格 + 週轉率雙重鎖定 ---
             if abs(ret_6d_raw) >= 28 and daily_turnover >= 20:
                 if (i - last_trigger["rule4"]) >= 6:
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
                     last_trigger["rule4"] = i
 
-            # --- 🔥 第10款：累積週轉率異常 (80%天際線) ---
+            # --- 第10款：累積週轉率異常 ---
             if turnover_6d >= 80 and daily_turnover >= 20: 
                 if (i - last_trigger["rule10"]) >= 6:
                     reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
                     last_trigger["rule10"] = i
+
+        # --- 🔥 新增 第11款：起迄兩個營業日價差異常 ---
+        if i >= 5:
+            p_close_5 = df_price['close'].iloc[i-5]
+            diff_11 = c_close - p_close_5
+            abs_diff_11 = abs(diff_11)
+            
+            # 動態計算級距門檻：500元以下為100元，以上每500元一級距增加25元
+            tier_11 = int(c_close // 500)
+            threshold_11 = 100 + tier_11 * 25
+            
+            if abs_diff_11 >= threshold_11:
+                six_day_prices = df_price['close'].iloc[i-5:i+1]
+                if diff_11 > 0 and c_close == six_day_prices.max():
+                    reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最高者 ﹝第十一款﹞")
+                elif diff_11 < 0 and c_close == six_day_prices.min():
+                    reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最低者 ﹝第十一款﹞")
 
         # --- 第13款：當沖異常 ---
         total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
@@ -478,7 +494,7 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用掛載「冷卻排他系統」的終極引擎
+        # 🔥 調用掛載「第十一款」與動態陣列的究極引擎
         df_notice = calculate_local_attention(df_price, df_day, total_sheets)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
