@@ -48,7 +48,8 @@ def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     try:
         res = requests.get(url, params=params, timeout=10).json()
         return pd.DataFrame(res.get('data', []))
-    except: return pd.DataFrame()
+    except: 
+        return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
 def get_all_info():
@@ -63,7 +64,7 @@ def get_all_info():
 
 @st.cache_data(ttl=600)
 def get_notice_finmind_version(sid):
-    """🚀 100% 走 FinMind VIP 通道，並修正過濾參數名稱為 stock_id"""
+    """🚀 走 FinMind VIP 通道，並進行多重欄位安全攔截"""
     start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
@@ -83,7 +84,7 @@ def get_notice_finmind_version(sid):
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values('date', ascending=True).reset_index(drop=True)
         
-        # 🧠 計算近 20 個交易日（約 30 個日曆日）的累積次數
+        # 🧠 計算近 20 個交易日的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -94,12 +95,20 @@ def get_notice_finmind_version(sid):
         df['近20日累計次數'] = counts
         df['年月日'] = df['date'].dt.strftime('%Y-%m-%d')
         
+        # 🛡️ 安全攔截條款欄位名稱
         if 'reason' in df.columns:
             df = df.rename(columns={'reason': '觸發條款'})
         elif 'notice_condition' in df.columns:
             df = df.rename(columns={'notice_condition': '觸發條款'})
+        elif 'details' in df.columns:
+            df = df.rename(columns={'details': '觸發條款'})
         else:
-            df['觸發條款'] = "符合注意股票判定標準"
+            # 萬一遇到未知欄位，自動把非日期的第一個文字欄位當作條款
+            text_cols = [c for c in df.columns if c not in ['date', 'stock_id', '年月日', '近20日累計次數']]
+            if text_cols:
+                df = df.rename(columns={text_cols[0]: '觸發條款'})
+            else:
+                df['觸發條款'] = "符合注意股票判定標準"
             
         df = df.sort_values('date', ascending=False).reset_index(drop=True)
         return df[['年月日', '近20日累計次數', '觸發條款']]
@@ -223,8 +232,20 @@ else:
 market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
-# 修正處：剔除錯誤字眼 charges
-history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty else False
+
+# 🛡️ 終極修正：動態欄位安全檢查，絕不允許 KeyError 再次發生
+if not df_day.empty:
+    # 尋找包含 Volume 或 volume 關鍵字的欄位，若找不到則直接抓非日期的數值欄位最大值
+    vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
+    if vol_cols:
+        history_can_day = df_day[vol_cols[0]].max() > 0
+    else:
+        # 最強保險絲：直接看排除日期以外的第一個欄位有沒有大於 0
+        valid_cols = [c for c in df_day.columns if c not in ['date', 'stock_id']]
+        history_can_day = df_day[valid_cols[0]].max() > 0 if valid_cols else True
+else:
+    history_can_day = False
+
 is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
@@ -341,16 +362,24 @@ if not df_price.empty:
 
     col_r2 = st.columns(4)
     day_pct, day_vol_lots, day_date_sub = 0, 0, ""
-    if not df_day.empty and 'Buy_After_Day_Trading_Sell_Trade_Volume' in df_day.columns:
-        last_day_row = df_day.iloc[-1]
-        day_date = last_day_row['date']
-        day_date_sub = f"({pd.to_datetime(day_date).strftime('%m/%d')})"
-        day_trade_vol = last_day_row['Buy_After_Day_Trading_Sell_Trade_Volume']
+    if not df_day.empty:
+        # 當沖率與當沖成交量動態配對
+        day_vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
+        day_pct_cols = [c for c in df_day.columns if 'percent' in c.lower() or 'ratio' in c.lower()]
         
-        match_price = df_price[df_price.index == pd.to_datetime(day_date)]
-        match_vol = match_price['Trading_Volume'].iloc[0] if not match_price.empty else 0
-        day_vol_lots = day_trade_vol / 1000
-        day_pct = (day_trade_vol / match_vol) * 100 if match_vol > 0 else 0
+        last_day_row = df_day.iloc[-1]
+        day_date_sub = f"({pd.to_datetime(last_day_row['date']).strftime('%m/%d')})"
+        
+        day_trade_vol = last_day_row[day_vol_cols[0]] if day_vol_cols else 0
+        day_vol_lots = day_trade_vol / 1000 if day_trade_vol > 100 else day_trade_vol # 防呆張數與股數單位
+        
+        if day_pct_cols:
+            day_pct = last_day_row[day_pct_cols[0]]
+            if day_pct < 1: day_pct *= 100
+        else:
+            match_price = df_price[df_price.index == pd.to_datetime(last_day_row['date'])]
+            match_vol = match_price['Trading_Volume'].iloc[0] if not match_price.empty else 0
+            day_pct = (day_trade_vol / match_vol) * 100 if match_vol > 0 else 0
 
     m_card(col_r2[0], "當沖率", f"{day_pct:.1f}%", clr="#f5c518", sub=day_date_sub)
     m_card(col_r2[1], "當沖獲利", "N/A", clr="#555")       
