@@ -63,23 +63,20 @@ def get_all_info():
     return mapping
 
 # ==========================================
-# 🧠 霸氣自研：本地端法規判定引擎 4.0 (實戰淬鍊版)
+# 🧠 霸氣自研：本地端法規判定引擎 4.0 (含大盤校正)
 # ==========================================
-def calculate_local_attention(df_price, df_day, df_margin):
-    """完美重現證交所第1款、第10款與第13款天條"""
+def calculate_local_attention(df_price, df_day, df_margin, df_taiex):
+    """完美重現證交所第1款、第10款與第13款等複合天條"""
     records = []
     if df_price.empty or len(df_price) < 7:
         return pd.DataFrame()
 
-    # 1. 🛡️ 單位智能對齊：取得總發行張數
+    # 1. 🛡️ 取得總發行張數 (徹底捨棄錯誤的數量級判斷，FinMind 融資限額統一為股)
     total_sheets = 0
     if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
         limit = df_margin['MarginPurchaseLimit'].max()
         if pd.notna(limit) and limit > 0:
-            if limit < 1000000: 
-                total_sheets = limit * 4 
-            else: 
-                total_sheets = (limit * 4) / 1000 
+            total_sheets = (limit * 4) / 1000 
 
     # 2. 建立當沖字典提升比對速度
     day_dict = {}
@@ -93,7 +90,15 @@ def calculate_local_attention(df_price, df_day, df_margin):
             if dt_pct < 1 and dt_pct > 0: dt_pct *= 100
             day_dict[dt_str] = {'vol': dt_vol, 'pct': dt_pct}
 
-    # 3. 掃描近 30 個交易日
+    # 3. 建立大盤 (TAIEX) 字典，作為漲跌幅偏離基準
+    taiex_dict = {}
+    if not df_taiex.empty:
+        df_taiex['date'] = pd.to_datetime(df_taiex['date'])
+        for _, r in df_taiex.iterrows():
+            dt_str = r['date'].strftime('%Y-%m-%d')
+            taiex_dict[dt_str] = r['close']
+
+    # 4. 掃描近 30 個交易日
     scan_range = min(30, len(df_price) - 6)
     for i in range(len(df_price) - scan_range, len(df_price)):
         curr_date = df_price.index[i]
@@ -101,33 +106,36 @@ def calculate_local_attention(df_price, df_day, df_margin):
         
         reasons = []
 
-        # --- 法規條件 A：短期漲跌幅異常 ---
-        # 基準為 T-6 的收盤價
+        # --- 法規條件 A：第1款 漲跌幅異常 (含大盤偏離率) ---
         if i >= 6:
-            p_close_6 = df_price['close'].iloc[i-6] 
-            ret_6d = abs((c_close / p_close_6) - 1) * 100 if p_close_6 > 0 else 0
-            # 無大盤基準補償值：拉高至 32% 避免假警報
-            if ret_6d >= 32: 
-                reasons.append(f"6日累積漲跌幅達 {ret_6d:.1f}%")
-        
-        # --- 法規條件 B：第十款 週轉率異常 ---
-        vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
-        turnover_6d = (vol_6d_lots / total_sheets * 100) if total_sheets > 0 else 0
-        
-        daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
-        daily_turnover = (daily_vol_lots / total_sheets * 100) if total_sheets > 0 else 0
-        
-        # 完美復刻：6日 > 50% 且 單日 > 20%
-        if turnover_6d >= 50 and daily_turnover >= 20: 
-            reasons.append(f"6日累積週轉率達 {turnover_6d:.1f}%，當日週轉率達 {daily_turnover:.1f}%")
-
-        # --- 法規條件 C：第十三款 當沖異常 ---
-        total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
-        dt_vol_6d = 0
-        for j in range(i-5, i+1):
-            date_key = df_price.index[j].strftime('%Y-%m-%d')
-            dt_vol_6d += day_dict.get(date_key, {}).get('vol', 0)
+            p_close_6 = df_price['close'].iloc[i-6] # 基準日為 T-6
+            ret_6d = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             
+            dt_str_curr = curr_date.strftime('%Y-%m-%d')
+            dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
+            taiex_c = taiex_dict.get(dt_str_curr, 0)
+            taiex_p6 = taiex_dict.get(dt_str_p6, 0)
+            taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
+            
+            # 完美復刻：絕對漲跌幅 > 25% 且 偏離大盤 > 20%
+            if abs(ret_6d) >= 25 and abs(ret_6d - taiex_ret_6d) >= 20: 
+                reasons.append(f"6日累積漲跌幅達 {abs(ret_6d):.1f}% (偏離大盤>20%)")
+        
+        # --- 法規條件 B：第10款 週轉率異常 ---
+        if total_sheets > 0:
+            vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
+            turnover_6d = (vol_6d_lots / total_sheets * 100) 
+            
+            daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
+            daily_turnover = (daily_vol_lots / total_sheets * 100)
+            
+            # 完美復刻：6日 > 50% 且 當日 > 10%
+            if turnover_6d >= 50 and daily_turnover >= 10: 
+                reasons.append(f"6日累積週轉率達 {turnover_6d:.1f}%，當日達 {daily_turnover:.1f}%")
+
+        # --- 法規條件 C：第13款 當沖異常 ---
+        total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
+        dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
         dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
         
         dt_str = curr_date.strftime('%Y-%m-%d')
@@ -136,20 +144,20 @@ def calculate_local_attention(df_price, df_day, df_margin):
             daily_vol = df_price['Trading_Volume'].iloc[i]
             daily_dt_pct = (day_dict[dt_str]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
         
-        # 完美復刻：6日當沖 > 60% 且 單日 > 60%
+        # 完美復刻：6日當沖 > 60% 且 當日 > 60%
         if dt_pct_6d >= 60 and daily_dt_pct >= 60:
-            reasons.append(f"6日累積當沖比率達 {dt_pct_6d:.1f}%，當日當沖率達 {daily_dt_pct:.1f}%")
+            reasons.append(f"6日累積當沖率達 {dt_pct_6d:.1f}%，當日達 {daily_dt_pct:.1f}%")
 
         # --- 法規條件 D：長線暴衝 ---
         if i >= 30:
-            p31 = df_price['close'].iloc[i-30]
-            if p31 > 0 and (c_close / p31 - 1) >= 1.0: reasons.append("30日漲幅>100%")
+            p30 = df_price['close'].iloc[i-30]
+            if p30 > 0 and (c_close / p30 - 1) >= 1.0: reasons.append("30日漲幅過大(>100%)")
         if i >= 60:
-            p61 = df_price['close'].iloc[i-60]
-            if p61 > 0 and (c_close / p61 - 1) >= 1.3: reasons.append("60日漲幅>130%")
+            p60 = df_price['close'].iloc[i-60]
+            if p60 > 0 and (c_close / p60 - 1) >= 1.3: reasons.append("60日漲幅過大(>130%)")
         if i >= 90:
-            p91 = df_price['close'].iloc[i-90]
-            if p91 > 0 and (c_close / p91 - 1) >= 1.6: reasons.append("90日漲幅>160%")
+            p90 = df_price['close'].iloc[i-90]
+            if p90 > 0 and (c_close / p90 - 1) >= 1.6: reasons.append("90日漲幅過大(>160%)")
 
         # 有觸發嚴格條件才記錄
         if reasons:
@@ -195,7 +203,7 @@ def calc_risk(prices):
     if l < 7: return False
     now = prices[-1]
     # 同步修改預測引擎的基準日為 T-6 (Index -7)
-    c1 = (abs(now / prices[-7] - 1) > 0.32) if l >= 7 else False
+    c1 = (abs(now / prices[-7] - 1) > 0.25) if l >= 7 else False
     c2 = (now / prices[-31] - 1 > 1.0) if l >= 31 else False
     c3 = (now / prices[-61] - 1 > 1.3) if l >= 61 else False
     c4 = (now / prices[-91] - 1 > 1.6) if l >= 91 else False
@@ -233,6 +241,8 @@ safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
 
 with st.spinner("正在透過本地引擎嚴格推演量價風控模型..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
+    # 🔥 核心修正：同步載入大盤指數作為偏離率基準
+    df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
@@ -275,7 +285,7 @@ else:
 turnover_warn_str = ""
 if not df_price.empty and len(closes) >= 60:
     avg_vol_60d_lots = vols.tail(60).mean() / 1000
-    warn_volume = avg_vol_60d_lots * 5 # 法規：較60日均量放大5倍
+    warn_volume = avg_vol_60d_lots * 5 
     if warn_volume > 0:
         turnover_warn_str = f"約 {warn_volume:,.0f} 張"
     else:
@@ -357,7 +367,7 @@ if not df_price.empty:
                 else: break
             
             d, p = simulate(list(closes), streak)
-            p_warn = closes.iloc[-6] * 1.32 if len(closes) >= 7 else 0
+            p_warn = closes.iloc[-6] * 1.25 if len(closes) >= 7 else 0
             
             if d:
                 risk_width = max(0, min(100, 100 - (d * 10)))
@@ -480,8 +490,8 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 調用嚴格法規過濾的引擎
-        df_notice = calculate_local_attention(df_price, df_day, df_margin)
+        # 🔥 調用嚴格包含大盤與當日條件的法規計算引擎
+        df_notice = calculate_local_attention(df_price, df_day, df_margin, df_taiex)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
             if not df_notice.empty:
