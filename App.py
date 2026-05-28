@@ -11,29 +11,49 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
 # ==========================================
-# 🎨 專業版自訂 CSS (強制水平垂直對齊)
+# 🎨 專業版自訂 CSS (結合漲跌停底色與橫幅)
 # ==========================================
 st.markdown("""
 <style>
-    /* 頂部兩大看板專用 (收盤價 / 風險預測) */
+    /* 頂部兩大看板專用 (高度140px) */
     .top-card { 
-        background-color: #1e1e26; border-radius: 12px; padding: 25px; 
+        background-color: #1e1e26; border-radius: 12px; padding: 20px 25px; 
         margin-bottom: 15px; border: 1px solid #333; 
         box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
-        height: 140px; /* 強制相同高度 */
+        height: 140px; 
         display: flex; flex-direction: column; justify-content: center;
     }
-    /* 下方十二宮格數據卡片專用 */
+    /* 下方十二宮格數據卡片專用 (高度120px) */
     .metric-card { 
-        background-color: #1e1e26; border-radius: 12px; padding: 20px; 
+        background-color: #1e1e26; border-radius: 12px; padding: 15px 20px; 
         margin-bottom: 15px; border: 1px solid #333; 
         box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
-        height: 120px; /* 強制相同高度，確保三排水平垂直完美對齊 */
+        height: 120px; 
         display: flex; flex-direction: column; justify-content: center;
     }
+    
     .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; font-weight: 500;}
     .metric-value { color: #ffffff; font-size: 26px; font-weight: 700; line-height: 1.2;}
     .metric-sub { font-size: 13px; font-weight: 500; margin-top: 6px; color: #888; }
+    
+    /* 針對收盤價加大字體與漲跌停方塊 */
+    .price-value { font-size: 38px; font-weight: 800; line-height: 1.2; margin-bottom: 4px;}
+    .limit-up { background-color: #ff4b4b; color: #ffffff !important; padding: 2px 10px; border-radius: 6px; display: inline-block; }
+    .limit-down { background-color: #00ff00; color: #000000 !important; padding: 2px 10px; border-radius: 6px; display: inline-block; }
+    
+    /* 頂部觸發注意股的公告橫幅 */
+    .notice-banner {
+        border: 1px solid #5a4b1c;
+        border-radius: 10px;
+        background-color: #1f1b10;
+        padding: 20px 25px;
+        margin-bottom: 20px;
+        box-shadow: 0px 4px 12px rgba(255, 193, 7, 0.1);
+    }
+    .notice-banner-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #443c24; padding-bottom: 12px; margin-bottom: 12px; }
+    .notice-banner-title { color: #ffc107; font-size: 22px; font-weight: 800; display: flex; align-items: center; gap: 8px;}
+    .notice-banner-date { color: #aaaaaa; font-size: 16px; font-weight: 600;}
+    .notice-banner-content { color: #e0e0e0; font-size: 16px; line-height: 1.6; font-weight: 500;}
     
     .tags-container { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; height: 100%; padding-bottom: 5px; }
     .tag-base { padding: 4px 12px; border-radius: 4px; font-size: 13px; font-weight: 600; border: 1px solid #444; }
@@ -114,6 +134,14 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
+    last_trigger = {
+        "rule1": -999,
+        "rule4": -999,
+        "rule10": -999,
+        "rule11": -999,
+        "rule13": -999
+    }
+
     scan_range = min(30, len(df_price) - 6)
     for i in range(len(df_price) - scan_range, len(df_price)):
         curr_date = df_price.index[i]
@@ -137,7 +165,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # 第一款：上市與上櫃雙軌制
             if is_twse:
                 dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
                 taiex_c = taiex_dict.get(dt_str_curr, 0)
@@ -152,16 +179,13 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
             
-            # 第四款：價格 + 週轉率
             if abs(ret_6d_raw) >= 25 and daily_turnover >= 20:
                 word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                 reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
 
-            # 第十款：累積週轉率異常
             if turnover_6d >= 80 and daily_turnover >= 20: 
                 reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
 
-        # 第十一款：絕對價差異常
         if i >= 5:
             p_close_5 = df_price['close'].iloc[i-5]
             diff_5d_11 = c_close - p_close_5
@@ -177,7 +201,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 elif diff_5d_11 < 0 and c_close == six_day_prices.min():
                     reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最低者 ﹝第十一款﹞")
 
-        # 第十三款：當沖異常
         total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
         dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
         dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
@@ -256,7 +279,6 @@ if not stock_list:
     st.error("正在連線 FinMind 或 Token 無效，請確認網路與設定。")
     st.stop()
 
-# 調整頂部欄位的間距，保證左右 1:1 對齊
 top_col1, top_col2 = st.columns([1, 1], gap="medium")
 
 with top_col1:
@@ -308,23 +330,32 @@ if not df_price.empty:
     p_prev = closes.iloc[-2] if len(closes) > 1 else p_now
     diff = p_now - p_prev
     pct = (diff / p_prev) * 100 if p_prev > 0 else 0
-    c_class = "red-text" if diff > 0 else "green-text" if diff < 0 else ""
     today_vol = vols.iloc[-1]
     price_date_str = pd.to_datetime(df_price.index[-1]).strftime('%m/%d')
-else:
-    p_now, today_vol, price_date_str = 0, 0, ""
-
-turnover_warn_str = ""
-if not df_price.empty and len(closes) >= 60:
-    avg_vol_60d_lots = vols.tail(60).mean() / 1000
-    warn_volume = avg_vol_60d_lots * 5 
-    if warn_volume > 0:
-        turnover_warn_str = f"約 {warn_volume:,.0f} 張"
+    price_date_str_full = pd.to_datetime(df_price.index[-1]).strftime('%Y-%m-%d')
+    
+    # 漲跌停極限判定 (抓 9.5% 門檻)
+    is_limit_up = pct >= 9.5
+    is_limit_down = pct <= -9.5
+    if is_limit_up:
+        c_class = "limit-up"
+        arrow_sub_class = "white-text" 
+    elif is_limit_down:
+        c_class = "limit-down"
+        arrow_sub_class = "black-text"
     else:
-        turnover_warn_str = "均量過低無法估算"
+        c_class = "red-text" if diff > 0 else "green-text" if diff < 0 else ""
+        arrow_sub_class = c_class
 else:
-    turnover_warn_str = "無法估算 (資料未滿60日)"
+    p_now, today_vol, price_date_str, price_date_str_full = 0, 0, "", ""
+    c_class, arrow_sub_class = "", ""
 
+# 🔥 核心：全局提早計算本地注意股清單，以備 UI 置頂橫幅使用
+df_notice_local = calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
+
+# ==========================================
+# 🚀 頂部標籤與橫幅渲染
+# ==========================================
 market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
@@ -366,18 +397,48 @@ with top_col2:
 
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
+# 🔥 動態公告橫幅：若當日有觸發注意股，立刻以置頂 UI 顯示
+if not df_notice_local.empty and price_date_str_full != "":
+    latest_notice_row = df_notice_local.iloc[0]
+    if latest_notice_row['年月日'] == price_date_str_full:
+        banner_html = f"""
+        <div class="notice-banner">
+            <div class="notice-banner-header">
+                <div class="notice-banner-title">⚠️ 注意交易資訊公告</div>
+                <div class="notice-banner-date">{latest_notice_row['年月日'].replace('-', '/')}</div>
+            </div>
+            <div class="notice-banner-content">
+                {latest_notice_row['觸發條款'].replace(' \n', '<br>')}
+            </div>
+        </div>
+        """
+        st.markdown(banner_html, unsafe_allow_html=True)
+
+# ------------------------------
+# 🚀 異常爆量警戒倒推模型
+# ------------------------------
+turnover_warn_str = ""
+if not df_price.empty and len(closes) >= 60:
+    avg_vol_60d_lots = vols.tail(60).mean() / 1000
+    warn_volume = avg_vol_60d_lots * 5 
+    if warn_volume > 0:
+        turnover_warn_str = f"約 {warn_volume:,.0f} 張"
+    else:
+        turnover_warn_str = "均量過低無法估算"
+else:
+    turnover_warn_str = "無法估算 (資料未滿60日)"
+
 if total_sheets == 0:
     st.warning("⚠️ 無法從資料庫精確取得股本資料，週轉率相關天條（第4、10款）可能無法正常觸發！")
 
 if not df_price.empty:
-    # 頂部收盤價與風險預測，利用 top-card 類別強制等高對齊
     c1, c2 = st.columns([1, 1], gap="medium")
     with c1:
         p_html = (
             '<div class="top-card">'
             '<div class="metric-label">收盤價</div>'
-            f'<div class="metric-value {c_class}">{p_now:.2f}</div>'
-            f'<div class="metric-sub {c_class}">{"▲" if diff>0 else "▼" if diff<0 else ""} {abs(diff):.2f} ({pct:+.2f}%)</div>'
+            f'<div class="price-value {c_class}">{p_now:.2f}</div>'
+            f'<div class="metric-sub {arrow_sub_class}">{"▲" if diff>0 else "▼" if diff<0 else ""} {abs(diff):.2f} ({pct:+.2f}%)</div>'
             '</div>'
         )
         st.markdown(p_html, unsafe_allow_html=True)
@@ -441,7 +502,6 @@ if not df_price.empty:
         )
         c.markdown(card_html, unsafe_allow_html=True)
 
-    # 確保十二宮格每一列都有加上 gap="medium" 並強制等高
     col_r1 = st.columns(4, gap="medium")
     vol_lots = today_vol / 1000 
     turnover = (vol_lots / total_sheets * 100) if total_sheets > 0 else 0
@@ -527,11 +587,10 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2, gap="medium")
     
     with h_col1:
-        df_notice = calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
-        notice_count = len(df_notice) if not df_notice.empty else 0
+        notice_count = len(df_notice_local) if not df_notice_local.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
-            if not df_notice.empty:
-                st.dataframe(df_notice, hide_index=True, use_container_width=True)
+            if not df_notice_local.empty:
+                st.dataframe(df_notice_local, hide_index=True, use_container_width=True)
             else: 
                 st.write("近 30 交易日內未觸發系統嚴格注意標準")
                 
