@@ -61,12 +61,10 @@ def get_all_info():
                 mapping[f"{code} {r['stock_name']}"] = {"id": code, "market": r['type'], "industry": r['industry_category']}
     return mapping
 
-@st.cache_data(ttl=600) # 盤後盯盤抓資料快取縮短到10分鐘
+@st.cache_data(ttl=600)
 def get_notice_finmind_version(sid):
-    """🚀 終極修正：對應 FinMind 真正的注意股 Schema (使用 stock_id 參數過濾)"""
+    """🚀 100% 走 FinMind VIP 通道，並修正過濾參數名稱為 stock_id"""
     start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-    
-    # 💡 核心修正：FinMind 的注意股 API 的過濾參數是 stock_id，而非 data_id
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockAttentionSecurities",
@@ -85,7 +83,7 @@ def get_notice_finmind_version(sid):
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values('date', ascending=True).reset_index(drop=True)
         
-        # 🧠 記憶體直接計算：近 20 個交易日 (約 30 個日曆日) 的累積次數
+        # 🧠 計算近 20 個交易日（約 30 個日曆日）的累積次數
         counts = []
         for i in range(len(df)):
             curr_date = df.loc[i, 'date']
@@ -96,7 +94,6 @@ def get_notice_finmind_version(sid):
         df['近20日累計次數'] = counts
         df['年月日'] = df['date'].dt.strftime('%Y-%m-%d')
         
-        # 動態相容 FinMind 欄位命名規則 (reason 或 notice_condition 皆能攔截)
         if 'reason' in df.columns:
             df = df.rename(columns={'reason': '觸發條款'})
         elif 'notice_condition' in df.columns:
@@ -226,7 +223,8 @@ else:
 market_name = "上市" if is_twse else "上櫃"
 can_margin = df_margin['MarginPurchaseLimit'].max() > 0 if not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns else False
 can_short = df_margin['ShortSaleLimit'].max() > 0 if not df_margin.empty and 'ShortSaleLimit' in df_margin.columns else False
-history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty charges else False
+# 修正處：剔除錯誤字眼 charges
+history_can_day = df_day['Buy_After_Day_Trading_Sell_Trade_Volume'].max() > 0 if not df_day.empty else False
 is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
@@ -403,7 +401,6 @@ if not df_price.empty:
     h_col1, h_col2 = st.columns(2)
     
     with h_col1:
-        # 🔥 關鍵決戰點：改用對齊 FinMind 規格的過濾函數
         df_notice = get_notice_finmind_version(sid)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 近 30 交易日【注意股】歷史紀錄 (共 {notice_count} 次)"):
