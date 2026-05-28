@@ -10,18 +10,38 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
+# ==========================================
+# 🎨 專業版自訂 CSS (強制水平垂直對齊)
+# ==========================================
 st.markdown("""
 <style>
-    .card-container { background-color: #1e1e26; border-radius: 12px; padding: 20px; margin-bottom: 15px; border: 1px solid #333; box-shadow: 2px 2px 10px rgba(0,0,0,0.3); }
-    .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; }
-    .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
-    .metric-sub { font-size: 13px; font-weight: 500; margin-top: 5px; color: #888; }
+    /* 頂部兩大看板專用 (收盤價 / 風險預測) */
+    .top-card { 
+        background-color: #1e1e26; border-radius: 12px; padding: 25px; 
+        margin-bottom: 15px; border: 1px solid #333; 
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
+        height: 220px; /* 強制相同高度 */
+        display: flex; flex-direction: column; justify-content: center;
+    }
+    /* 下方十二宮格數據卡片專用 */
+    .metric-card { 
+        background-color: #1e1e26; border-radius: 12px; padding: 20px; 
+        margin-bottom: 15px; border: 1px solid #333; 
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
+        height: 140px; /* 強制相同高度，確保三排水平垂直完美對齊 */
+        display: flex; flex-direction: column; justify-content: center;
+    }
+    .metric-label { color: #88888e; font-size: 14px; margin-bottom: 8px; font-weight: 500;}
+    .metric-value { color: #ffffff; font-size: 26px; font-weight: 700; line-height: 1.2;}
+    .metric-sub { font-size: 13px; font-weight: 500; margin-top: 6px; color: #888; }
+    
     .tags-container { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; height: 100%; padding-bottom: 5px; }
     .tag-base { padding: 4px 12px; border-radius: 4px; font-size: 13px; font-weight: 600; border: 1px solid #444; }
     .t-market { background-color: #2e2e38; color: #ddd; }
     .t-warn { background-color: #ffc107; color: #000; border: none; font-size: 14px; }
     .t-on { background-color: #3b3b4f; color: #fff; border-color: #666; }
     .t-off { background-color: #1a1a21; color: #555; border-color: #333; }
+    
     .red-text { color: #ff4b4b !important; }
     .green-text { color: #00ff00 !important; }
     .title-text { font-size: 32px; font-weight: 800; color: #fff; margin-bottom: 25px; }
@@ -29,14 +49,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 資料抓取模組 (終極雙參數防禦)
+# 📡 資料抓取模組
 # ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {"dataset": dataset, "token": token}
     if data_id: 
         params["data_id"] = data_id
-        params["stock_id"] = data_id  # 雙管齊下，破解 FinMind 參數迷宮
+        params["stock_id"] = data_id
     if start: params["start_date"] = start
     try:
         res = requests.get(url, params=params, timeout=10).json()
@@ -69,7 +89,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (無冷卻期純天然實戰版)
+# 🧠 核心：本地端法規判定引擎
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -102,8 +122,8 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
         reasons = []
 
         if i >= 6:
-            p_close_6 = df_price['close'].iloc[i-6] # T-6 作為累積漲跌幅基準
-            p_close_5 = df_price['close'].iloc[i-5] # T-5 作為起迄價差基準
+            p_close_6 = df_price['close'].iloc[i-6]
+            p_close_5 = df_price['close'].iloc[i-5]
             
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             diff_5d = c_close - p_close_5
@@ -117,9 +137,8 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # --- 🔥 第一款：上市與上櫃雙軌制 ---
+            # 第一款：上市與上櫃雙軌制
             if is_twse:
-                # 【上市】：需偏離大盤
                 dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
                 taiex_c = taiex_dict.get(dt_str_curr, 0)
                 taiex_p6 = taiex_dict.get(dt_str_p6, 0)
@@ -129,22 +148,20 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
             else:
-                # 【上櫃】：不看大盤，看 T-5 絕對價差達50元
                 if abs(ret_6d_raw) >= 25 and abs(diff_5d) >= 50:
                     word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
             
-            # --- 🔥 第四款：價格 + 週轉率 (嚴格當日 >= 20% 門檻) ---
-            # 直接過濾掉 5/11、5/25 的低週轉假警報，完美命中 5/28 的 25.6%
+            # 第四款：價格 + 週轉率
             if abs(ret_6d_raw) >= 25 and daily_turnover >= 20:
                 word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                 reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.2f}%(第四款)")
 
-            # --- 🔥 第十款：累積週轉率異常 (80% / 20% 天際線) ---
+            # 第十款：累積週轉率異常
             if turnover_6d >= 80 and daily_turnover >= 20: 
                 reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
 
-        # --- 第十一款：絕對價差異常 (高價股條款) ---
+        # 第十一款：絕對價差異常
         if i >= 5:
             p_close_5 = df_price['close'].iloc[i-5]
             diff_5d_11 = c_close - p_close_5
@@ -160,7 +177,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 elif diff_5d_11 < 0 and c_close == six_day_prices.min():
                     reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最低者 ﹝第十一款﹞")
 
-        # --- 第十三款：當沖異常 ---
+        # 第十三款：當沖異常
         total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
         dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
         dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
@@ -173,9 +190,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
         if dt_pct_6d >= 60 and daily_dt_pct >= 60:
             reasons.append(f"最近六個營業日(含當日)之當沖成交量占總成交量達{dt_pct_6d:.2f}%，當日當沖比達{daily_dt_pct:.2f}%(第十三款)")
 
-        # 去重複（避免同日同類款項多次寫入）
         unique_reasons = list(dict.fromkeys(reasons))
-        
         if unique_reasons:
             records.append({
                 "date": curr_date,
@@ -183,7 +198,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 "觸發條款": " \n".join(unique_reasons)
             })
 
-    # 結算與累積次數
     df = pd.DataFrame(records)
     if not df.empty:
         df = df.sort_values('date', ascending=False).reset_index(drop=True)
@@ -242,7 +256,8 @@ if not stock_list:
     st.error("正在連線 FinMind 或 Token 無效，請確認網路與設定。")
     st.stop()
 
-top_col1, top_col2 = st.columns([1, 1])
+# 調整頂部欄位的間距，保證左右 1:1 對齊
+top_col1, top_col2 = st.columns([1, 1], gap="medium")
 
 with top_col1:
     search = st.selectbox("🔍 搜尋標的", options=list(stock_list.keys()), index=list(stock_list.keys()).index("5425 台半") if "5425 台半" in stock_list else 0)
@@ -355,10 +370,11 @@ if total_sheets == 0:
     st.warning("⚠️ 無法從資料庫精確取得股本資料，週轉率相關天條（第4、10款）可能無法正常觸發！")
 
 if not df_price.empty:
-    c1, c2 = st.columns(2)
+    # 頂部收盤價與風險預測，利用 top-card 類別強制等高對齊
+    c1, c2 = st.columns([1, 1], gap="medium")
     with c1:
         p_html = (
-            '<div class="card-container">'
+            '<div class="top-card">'
             '<div class="metric-label">收盤價</div>'
             f'<div class="metric-value {c_class}">{p_now:.2f}</div>'
             f'<div class="metric-sub {c_class}">{"▲" if diff>0 else "▼" if diff<0 else ""} {abs(diff):.2f} ({pct:+.2f}%)</div>'
@@ -369,7 +385,7 @@ if not df_price.empty:
     with c2:
         if is_punished:
             html_content = (
-                '<div class="card-container">'
+                '<div class="top-card">'
                 '<div class="metric-label">風險預測</div>'
                 f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中 ({disp_info["match"]})</div>'
                 f'<div class="metric-sub">處置期間：{disp_info["period"]}</div>'
@@ -392,7 +408,7 @@ if not df_price.empty:
             if d:
                 risk_width = max(0, min(100, 100 - (d * 10)))
                 html_content = (
-                    '<div class="card-container">'
+                    '<div class="top-card">'
                     '<div class="metric-label">風險預測</div>'
                     f'<div class="metric-value" style="color:#ffc107;">🔥 最快 {d} 天內進入處置 (或再次處置)</div>'
                     f'<div class="metric-sub">明日絕對注意價：{p_warn:.2f} ｜ 處置預估觸發價：{p:.2f}</div>'
@@ -404,7 +420,7 @@ if not df_price.empty:
                 st.markdown(html_content, unsafe_allow_html=True)
             else:
                 html_content = (
-                    '<div class="card-container">'
+                    '<div class="top-card">'
                     '<div class="metric-label">風險預測</div>'
                     '<div class="metric-value" style="color:#00ff00;">✅ 短期內無處置風險</div>'
                     f'<div class="metric-sub">明日絕對注意價：{p_warn:.2f} ｜ 連拉10根漲停亦安全</div>'
@@ -417,15 +433,16 @@ if not df_price.empty:
 
     def m_card(c, l, v, clr="white", sub=""):
         card_html = (
-            '<div class="card-container" style="padding:15px;">'
+            '<div class="metric-card">'
             f'<div class="metric-label">{l}</div>'
-            f'<div class="metric-value" style="font-size:22px; color:{clr};">{v}</div>'
+            f'<div class="metric-value" style="color:{clr};">{v}</div>'
             f'<div class="metric-sub">{sub}</div>'
             '</div>'
         )
         c.markdown(card_html, unsafe_allow_html=True)
 
-    col_r1 = st.columns(4)
+    # 確保十二宮格每一列都有加上 gap="medium" 並強制等高
+    col_r1 = st.columns(4, gap="medium")
     vol_lots = today_vol / 1000 
     turnover = (vol_lots / total_sheets * 100) if total_sheets > 0 else 0
     short_ratio, margin_date_sub = 0, ""
@@ -441,7 +458,7 @@ if not df_price.empty:
     m_card(col_r1[2], "週轉率", f"{turnover:.2f}%", sub="佔發行總張數")
     m_card(col_r1[3], "券資比", f"{short_ratio:.1f}%", sub=margin_date_sub)
 
-    col_r2 = st.columns(4)
+    col_r2 = st.columns(4, gap="medium")
     day_pct, day_vol_lots, day_date_sub = 0, 0, ""
     if not df_day.empty:
         day_vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
@@ -463,7 +480,7 @@ if not df_price.empty:
     m_card(col_r2[2], "當沖獲利率", "N/A", clr="#555")     
     m_card(col_r2[3], "當沖成交張數", f"{day_vol_lots:,.0f} 張", sub=day_date_sub)
 
-    col_r3 = st.columns(4)
+    col_r3 = st.columns(4, gap="medium")
     f_amt, t_amt, d_amt, total_amt = 0, 0, 0, 0
     inst_date_sub = ""
     if not df_inst.empty:
@@ -507,10 +524,9 @@ if not df_price.empty:
     # 📜 對稱雙塔：本機引擎自算 vs 官方處置
     # ==========================================
     st.markdown("---")
-    h_col1, h_col2 = st.columns(2)
+    h_col1, h_col2 = st.columns(2, gap="medium")
     
     with h_col1:
-        # 🔥 調用完美無冷卻期、實戰參數版引擎
         df_notice = calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
         notice_count = len(df_notice) if not df_notice.empty else 0
         with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
