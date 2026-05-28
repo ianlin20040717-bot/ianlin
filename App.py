@@ -11,7 +11,7 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
 
 # ==========================================
-# 🎨 專業版自訂 CSS (結合漲跌停底色與橫幅)
+# 🎨 專業版自訂 CSS
 # ==========================================
 st.markdown("""
 <style>
@@ -105,7 +105,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (上市櫃獨立參數覆蓋版)
+# 🧠 核心：本地端法規判定引擎 (破解全天條真神版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -130,7 +130,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
-    # 🛡️ 官方防呆冷卻系統
+    # 官方冷卻陣列
     last_trigger = {
         "rule1": -999,
         "rule3": -999,
@@ -140,7 +140,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
         "rule13": -999
     }
 
-    # 🔥 依據市場別，自動切換法規門檻參數
+    # 上市與上櫃的基準切換
     turnover_threshold = 10 if is_twse else 15
     vol_multiple = 5 if is_twse else 6
 
@@ -158,6 +158,12 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             diff_5d = c_close - p_close_5
             
+            # 計算大盤偏離率
+            dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
+            taiex_c = taiex_dict.get(dt_str_curr, 0)
+            taiex_p6 = taiex_dict.get(dt_str_p6, 0)
+            taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
+            
             if total_sheets > 0:
                 vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
                 turnover_6d = (vol_6d_lots / total_sheets * 100) 
@@ -167,29 +173,36 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # 建立價格異常判定布林值
+            # --- 🔥 第一款：上市與上櫃雙軌雙條件判定 (大盤偏離 OR 絕對價差) ---
             is_price_abnormal = False
             if is_twse:
-                dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
-                taiex_c = taiex_dict.get(dt_str_curr, 0)
-                taiex_p6 = taiex_dict.get(dt_str_p6, 0)
-                taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
-                is_price_abnormal = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
-                
-                if is_price_abnormal: 
+                # 上市：1. 漲幅 >= 25% 且偏離大盤 >= 20%  OR  2. 漲幅 >= 30% 且價差 >= 20元
+                cond1_A = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
+                cond1_B = abs(ret_6d_raw) >= 30 and abs(diff_5d) >= 20
+                if cond1_B or cond1_A:
+                    is_price_abnormal = True
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                        reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
+                        if cond1_B:
+                            reasons.append(f"最近六個營業日累積收盤價{word}達{abs(ret_6d_raw):.2f}%。且六個營業日起迄兩個營業日收盤價價差達{abs(diff_5d):.2f}元﹝第一款﹞")
+                        else:
+                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
             else:
-                is_price_abnormal = abs(ret_6d_raw) >= 25
-                if is_price_abnormal and abs(diff_5d) >= 50:
+                # 上櫃：1. 漲幅 >= 25% 且偏離大盤 >= 20%  OR  2. 漲幅 >= 25% 且價差 >= 50元
+                cond1_A = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
+                cond1_B = abs(ret_6d_raw) >= 25 and abs(diff_5d) >= 50
+                if cond1_B or cond1_A:
+                    is_price_abnormal = True
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                        reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
+                        if cond1_B:
+                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
+                        else:
+                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
 
-            # --- 🔥 第三款與第四款聯播判定 (精準鎖定 10% / 15% 門檻) ---
+            # --- 第三款與第四款聯播 ---
             rule3_hit = False
             rule4_hit = False
             vol_ratio = 0
@@ -199,7 +212,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
                 vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
                 
-                if is_price_abnormal and vol_ratio >= vol_multiple and daily_turnover >= turnover_threshold:
+                if is_price_abnormal and vol_ratio >= vol_multiple:
                     rule3_hit = True
 
             if is_price_abnormal and daily_turnover >= turnover_threshold:
@@ -211,6 +224,10 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款) 當日週轉率達{daily_turnover:.1f}%(第四款)")
                     last_trigger["rule3"] = i
                     last_trigger["rule4"] = i
+            elif rule3_hit:
+                if (i - last_trigger["rule3"]) >= 6:
+                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
+                    last_trigger["rule3"] = i
             elif rule4_hit:
                 if (i - last_trigger["rule4"]) >= 6:
                     reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
