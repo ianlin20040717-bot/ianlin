@@ -20,7 +20,7 @@ st.markdown("""
         background-color: #1e1e26; border-radius: 12px; padding: 25px; 
         margin-bottom: 15px; border: 1px solid #333; 
         box-shadow: 2px 2px 10px rgba(0,0,0,0.3); 
-        height: 180px; /* 強制相同高度 */
+        height: 120px; /* 強制相同高度 */
         display: flex; flex-direction: column; justify-content: center;
     }
     /* 下方十二宮格數據卡片專用 */
