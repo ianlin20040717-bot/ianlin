@@ -124,7 +124,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (完全修正版)
+# 🧠 核心：本地端法規判定引擎 (大盤濾網全覆蓋修正版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -149,12 +149,12 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
+    # 官方防呆冷卻陣列
     last_trigger = {
         "rule1": -999, "rule3": -999, "rule4": -999, 
         "rule10": -999, "rule11": -999, "rule13": -999
     }
 
-    turnover_threshold = 10 if is_twse else 15
     vol_multiple = 5 if is_twse else 6
 
     scan_range = min(30, len(df_price) - 6)
@@ -175,6 +175,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             taiex_c = taiex_dict.get(dt_str_curr, 0)
             taiex_p6 = taiex_dict.get(dt_str_p6, 0)
             taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
+            diff_index = abs(ret_6d_raw - taiex_ret_6d)
             
             if total_sheets > 0:
                 vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
@@ -185,36 +186,34 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # 通用的漲幅 25% 基礎門檻
-            is_ret_25 = abs(ret_6d_raw) >= 25
+            # 🔥 定義最底層的天條濾網：漲跌幅達25% 且 偏離大盤達20% (第三、第四款共用)
+            is_base_price_abnormal = abs(ret_6d_raw) >= 25 and diff_index >= 20
 
-            # --- 第一款：上市與上櫃嚴格脫鉤判定 ---
+            # --- 第一款：上市與上櫃獨立判定 ---
             if is_twse:
-                # 上市：大盤偏離 >= 20% 或 價差 >= 20元
-                cond1_A = is_ret_25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
+                cond1_A = abs(ret_6d_raw) >= 32 and diff_index >= 20
                 cond1_B = abs(ret_6d_raw) >= 30 and abs(diff_5d) >= 20
-                if cond1_B or cond1_A:
+                if cond1_A or cond1_B:
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                        if cond1_B:
+                        if cond1_B and not cond1_A:
                             reasons.append(f"最近六個營業日累積收盤價{word}達{abs(ret_6d_raw):.2f}%。且六個營業日起迄兩個營業日收盤價價差達{abs(diff_5d):.2f}元﹝第一款﹞")
                         else:
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
             else:
-                # 上櫃：漲幅 >= 32% 或 價差 >= 50元
-                cond1_A = abs(ret_6d_raw) >= 32
-                cond1_B = is_ret_25 and abs(diff_5d) >= 50
-                if cond1_B or cond1_A:
+                cond1_A = abs(ret_6d_raw) >= 32 and diff_index >= 20
+                cond1_B = is_base_price_abnormal and abs(diff_5d) >= 50
+                if cond1_A or cond1_B:
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                        if cond1_B:
+                        if cond1_B and not cond1_A:
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
                         else:
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
 
-            # --- 第三款與第四款聯播 (只需 25% 門檻) ---
+            # --- 🔥 第三款與第四款無縫聯播 (完美解釋 5/11 假警報與 5/12 聯播) ---
             rule3_hit = False
             rule4_hit = False
             vol_ratio = 0
@@ -223,26 +222,33 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
                 daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
                 vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
-                if is_ret_25 and vol_ratio >= vol_multiple:
+                
+                # 第三款嚴格要求：大盤偏離達標 + 均量達標 + 週轉率達10%
+                if is_base_price_abnormal and vol_ratio >= vol_multiple and daily_turnover >= 10:
                     rule3_hit = True
 
-            if is_ret_25 and daily_turnover >= turnover_threshold:
+            # 第四款嚴格要求：大盤偏離達標 + 週轉率達10%
+            if is_base_price_abnormal and daily_turnover >= 10:
                 rule4_hit = True
 
             word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-            if rule3_hit and rule4_hit:
-                if (i - last_trigger["rule3"]) >= 6 or (i - last_trigger["rule4"]) >= 6:
-                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款) 當日週轉率達{daily_turnover:.1f}%(第四款)")
-                    last_trigger["rule3"] = i
-                    last_trigger["rule4"] = i
-            elif rule3_hit:
-                if (i - last_trigger["rule3"]) >= 6:
-                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
-                    last_trigger["rule3"] = i
-            elif rule4_hit:
-                if (i - last_trigger["rule4"]) >= 6:
-                    reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
-                    last_trigger["rule4"] = i
+            out_str = []
+            
+            # 若觸發第三款，寫入前半段字串
+            if rule3_hit and (i - last_trigger["rule3"]) >= 6:
+                out_str.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
+                last_trigger["rule3"] = i
+                
+            # 若觸發第四款，動態決定是獨立發布還是接續聯播
+            if rule4_hit and (i - last_trigger["rule4"]) >= 6:
+                if not out_str:
+                    out_str.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
+                else:
+                    out_str.append(f"當日週轉率達{daily_turnover:.1f}%(第四款)")
+                last_trigger["rule4"] = i
+                
+            if out_str:
+                reasons.append(" ".join(out_str))
 
             # --- 第十款：累積週轉率異常 ---
             if turnover_6d >= 80 and daily_turnover >= 20: 
