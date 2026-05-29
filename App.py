@@ -8,10 +8,10 @@ from datetime import datetime, timedelta
 # ==========================================
 FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8"
 
-st.set_page_config(page_title="台股處置預警雷達 (全官方數據版)", layout="wide")
+st.set_page_config(page_title="台股處置預警雷達 (官方即時 x 本機歷史推演)", layout="wide")
 
 # ==========================================
-# 🎨 專業版自訂 CSS (結合漲跌停底色與橫幅)
+# 🎨 專業版自訂 CSS
 # ==========================================
 st.markdown("""
 <style>
@@ -67,7 +67,53 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 資料抓取模組 (FinMind + 上市櫃官方 OpenAPI)
+# 📡 官方 OpenAPI 即時串接 (修復上櫃 Reason 欄位)
+# ==========================================
+@st.cache_data(ttl=600)
+def fetch_official_status(sid, is_twse):
+    notice_data, disp_data = [], []
+    sid_str = str(sid).strip()
+    
+    try:
+        if is_twse:
+            res_n = requests.get("https://openapi.twse.com.tw/v1/announcement/notice", timeout=5).json()
+            for item in res_n:
+                if str(item.get("Code", "")).strip() == sid_str: 
+                    notice_data.append(item)
+            
+            res_d = requests.get("https://openapi.twse.com.tw/v1/announcement/disposition", timeout=5).json()
+            for item in res_d:
+                if str(item.get("Code", "")).strip() == sid_str: 
+                    disp_data.append(item)
+        else:
+            # 統一 TPEx (上櫃) 的爛位名稱與 TWSE 一致，確保後續 UI 可以正常讀取 Detail
+            res_n = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_notice_securities", timeout=5).json()
+            for item in res_n:
+                if str(item.get("SecCode", "")).strip() == sid_str or str(item.get("Code", "")).strip() == sid_str: 
+                    notice_data.append({
+                        "Date": item.get("SecDate", ""),
+                        "Code": item.get("SecCode", ""),
+                        "Name": item.get("SecName", ""),
+                        "Detail": item.get("Reason", "") # 🔥 上櫃叫做 Reason，轉為 Detail
+                    })
+                    
+            res_d = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposition_securities", timeout=5).json()
+            for item in res_d:
+                if str(item.get("SecCode", "")).strip() == sid_str or str(item.get("Code", "")).strip() == sid_str: 
+                    disp_data.append({
+                        "Date": item.get("SecDate", ""),
+                        "Code": item.get("SecCode", ""),
+                        "Name": item.get("SecName", ""),
+                        "Period": item.get("Period", ""),
+                        "Detail": item.get("Reason", "") # 🔥 上櫃叫做 Reason，轉為 Detail
+                    })
+    except: 
+        pass
+        
+    return notice_data, disp_data
+
+# ==========================================
+# 📡 FinMind 資料抓取模組
 # ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -83,38 +129,6 @@ def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     except: 
         pass
     return pd.DataFrame()
-
-@st.cache_data(ttl=600)
-def fetch_official_status(sid, is_twse):
-    """🏛️ 自動判斷上市櫃，串接官方 OpenAPI 取得即時處置/注意公告"""
-    notice_data, disp_data = [], []
-    sid_str = str(sid).strip()
-    
-    try:
-        if is_twse:
-            # TWSE 上市 API
-            res_n = requests.get("https://openapi.twse.com.tw/v1/announcement/notice", timeout=5).json()
-            for item in res_n:
-                if str(item.get("Code", "")).strip() == sid_str: notice_data.append(item)
-            
-            res_d = requests.get("https://openapi.twse.com.tw/v1/announcement/disposition", timeout=5).json()
-            for item in res_d:
-                if str(item.get("Code", "")).strip() == sid_str: disp_data.append(item)
-        else:
-            # TPEx 上櫃 API
-            res_n = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_notice_securities", timeout=5).json()
-            for item in res_n:
-                if str(item.get("SecCode", "")).strip() == sid_str or str(item.get("Code", "")).strip() == sid_str: 
-                    notice_data.append(item)
-                    
-            res_d = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposition_securities", timeout=5).json()
-            for item in res_d:
-                if str(item.get("SecCode", "")).strip() == sid_str or str(item.get("Code", "")).strip() == sid_str: 
-                    disp_data.append(item)
-    except: 
-        pass
-        
-    return notice_data, disp_data
 
 @st.cache_data(ttl=86400)
 def get_all_info():
@@ -138,6 +152,182 @@ def get_outstanding_shares(sid):
             return int((latest_capital / 10) / 1000)
     return 0
 
+# ==========================================
+# 🧠 核心：本地端法規判定引擎 (大盤濾網全覆蓋修正版 - 用於彌補官方無歷史資料)
+# ==========================================
+def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
+    records = []
+    if df_price.empty or len(df_price) < 7:
+        return pd.DataFrame()
+
+    day_dict = {}
+    if not df_day.empty:
+        vol_cols = [c for c in df_day.columns if 'volume' in c.lower() or 'lots' in c.lower()]
+        pct_cols = [c for c in df_day.columns if 'percent' in c.lower() or 'ratio' in c.lower()]
+        for _, r in df_day.iterrows():
+            dt_str = pd.to_datetime(r['date']).strftime('%Y-%m-%d')
+            dt_vol = r[vol_cols[0]] if vol_cols else 0
+            dt_pct = r[pct_cols[0]] if pct_cols else 0
+            if dt_pct < 1 and dt_pct > 0: dt_pct *= 100
+            day_dict[dt_str] = {'vol': dt_vol, 'pct': dt_pct}
+
+    taiex_dict = {}
+    if not df_taiex.empty:
+        df_taiex['date'] = pd.to_datetime(df_taiex['date'])
+        for _, r in df_taiex.iterrows():
+            dt_str = r['date'].strftime('%Y-%m-%d')
+            taiex_dict[dt_str] = r['close']
+
+    last_trigger = {
+        "rule1": -999, "rule3": -999, "rule4": -999, 
+        "rule10": -999, "rule11": -999, "rule13": -999
+    }
+
+    vol_multiple = 5 if is_twse else 6
+
+    scan_range = min(30, len(df_price) - 6)
+    for i in range(len(df_price) - scan_range, len(df_price)):
+        curr_date = df_price.index[i]
+        c_close = df_price['close'].iloc[i]
+        dt_str_curr = curr_date.strftime('%Y-%m-%d')
+        reasons = []
+
+        if i >= 6:
+            p_close_6 = df_price['close'].iloc[i-6]
+            p_close_5 = df_price['close'].iloc[i-5]
+            
+            ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
+            diff_5d = c_close - p_close_5
+            
+            dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
+            taiex_c = taiex_dict.get(dt_str_curr, 0)
+            taiex_p6 = taiex_dict.get(dt_str_p6, 0)
+            taiex_ret_6d = (taiex_c / taiex_p6 - 1) * 100 if taiex_p6 > 0 else 0
+            diff_index = abs(ret_6d_raw - taiex_ret_6d)
+            
+            if total_sheets > 0:
+                vol_6d_lots = df_price['Trading_Volume'].iloc[i-5:i+1].sum() / 1000
+                turnover_6d = (vol_6d_lots / total_sheets * 100) 
+                daily_vol_lots = df_price['Trading_Volume'].iloc[i] / 1000
+                daily_turnover = (daily_vol_lots / total_sheets * 100)
+            else:
+                turnover_6d = 0
+                daily_turnover = 0
+
+            is_base_price_abnormal = abs(ret_6d_raw) >= 25 and diff_index >= 20
+
+            if is_twse:
+                cond1_A = abs(ret_6d_raw) >= 32 and diff_index >= 20
+                cond1_B = abs(ret_6d_raw) >= 30 and abs(diff_5d) >= 20
+                if cond1_A or cond1_B:
+                    if (i - last_trigger["rule1"]) >= 6:
+                        word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                        if cond1_B and not cond1_A:
+                            reasons.append(f"最近六個營業日累積收盤價{word}達{abs(ret_6d_raw):.2f}%。且六個營業日起迄兩個營業日收盤價價差達{abs(diff_5d):.2f}元﹝第一款﹞")
+                        else:
+                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
+                        last_trigger["rule1"] = i
+            else:
+                cond1_A = abs(ret_6d_raw) >= 32 and diff_index >= 20
+                cond1_B = is_base_price_abnormal and abs(diff_5d) >= 50
+                if cond1_A or cond1_B:
+                    if (i - last_trigger["rule1"]) >= 6:
+                        word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+                        if cond1_B and not cond1_A:
+                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
+                        else:
+                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
+                        last_trigger["rule1"] = i
+
+            rule3_hit = False
+            rule4_hit = False
+            vol_ratio = 0
+            
+            if i >= 60:
+                avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
+                daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
+                vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
+                if is_base_price_abnormal and vol_ratio >= vol_multiple and daily_turnover >= 10:
+                    rule3_hit = True
+
+            if is_base_price_abnormal and daily_turnover >= 10:
+                rule4_hit = True
+
+            word = "漲幅" if ret_6d_raw > 0 else "跌幅"
+            out_str = []
+            
+            if rule3_hit and (i - last_trigger["rule3"]) >= 6:
+                out_str.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日之成交量較最近六十個營業日日平均成交量放大{vol_ratio:.2f}倍(第三款)")
+                last_trigger["rule3"] = i
+                
+            if rule4_hit and (i - last_trigger["rule4"]) >= 6:
+                if not out_str:
+                    out_str.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%，當日週轉率達{daily_turnover:.1f}%(第四款)")
+                else:
+                    out_str.append(f"當日週轉率達{daily_turnover:.1f}%(第四款)")
+                last_trigger["rule4"] = i
+                
+            if out_str:
+                reasons.append(" ".join(out_str))
+
+            if turnover_6d >= 80 and daily_turnover >= 20: 
+                if (i - last_trigger["rule10"]) >= 6:
+                    reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
+                    last_trigger["rule10"] = i
+
+        if i >= 5:
+            p_close_5 = df_price['close'].iloc[i-5]
+            diff_5d_11 = c_close - p_close_5
+            abs_diff_11 = abs(diff_5d_11)
+            tier_11 = int(c_close // 500)
+            threshold_11 = 100 + tier_11 * 25
+            if abs_diff_11 >= threshold_11:
+                six_day_prices = df_price['close'].iloc[i-5:i+1]
+                if diff_5d_11 > 0 and c_close == six_day_prices.max():
+                    if (i - last_trigger["rule11"]) >= 6:
+                        reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最高者 ﹝第十一款﹞")
+                        last_trigger["rule11"] = i
+                elif diff_5d_11 < 0 and c_close == six_day_prices.min():
+                    if (i - last_trigger["rule11"]) >= 6:
+                        reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最低者 ﹝第十一款﹞")
+                        last_trigger["rule11"] = i
+
+        total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
+        dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
+        dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
+        
+        daily_dt_pct = day_dict.get(dt_str_curr, {}).get('pct', 0)
+        if daily_dt_pct == 0 and day_dict.get(dt_str_curr, {}).get('vol', 0) > 0:
+            daily_vol = df_price['Trading_Volume'].iloc[i]
+            daily_dt_pct = (day_dict[dt_str_curr]['vol'] / daily_vol) * 100 if daily_vol > 0 else 0
+        
+        if dt_pct_6d >= 60 and daily_dt_pct >= 60:
+            if (i - last_trigger["rule13"]) >= 6:
+                reasons.append(f"最近六個營業日(含當日)之當沖成交量占總成交量達{dt_pct_6d:.2f}%，當日當沖比達{daily_dt_pct:.2f}%(第十三款)")
+                last_trigger["rule13"] = i
+
+        unique_reasons = list(dict.fromkeys(reasons))
+        if unique_reasons:
+            records.append({
+                "date": curr_date,
+                "年月日": dt_str_curr,
+                "觸發條款": " \n".join(unique_reasons)
+            })
+
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df = df.sort_values('date', ascending=False).reset_index(drop=True)
+        counts = []
+        for i in range(len(df)):
+            curr = df.loc[i, 'date']
+            start_win = curr - timedelta(days=30)
+            c = len(df[(df['date'] <= curr) & (df['date'] > start_win)])
+            counts.append(f"第 {c} 次")
+        df['近20日累計次數'] = counts
+        return df[['年月日', '近20日累計次數', '觸發條款']]
+
+    return pd.DataFrame()
+
 def extract_match_type(measure):
     m = str(measure)
     if any(k in m for k in ["九十分", "90分"]): return "90分盤"
@@ -153,6 +343,26 @@ def extract_match_type(measure):
     if "第二次" in m: return "20分盤"
     if "第一次" in m: return "5分盤"
     return "5分盤"
+
+def calc_risk(prices):
+    l = len(prices)
+    if l < 7: return False
+    now = prices[-1]
+    c1 = (abs(now / prices[-7] - 1) > 0.25) if l >= 7 else False
+    c2 = (now / prices[-31] - 1 > 1.0) if l >= 31 else False
+    c3 = (now / prices[-61] - 1 > 1.3) if l >= 61 else False
+    c4 = (now / prices[-91] - 1 > 1.6) if l >= 91 else False
+    return c1 or c2 or c3 or c4
+
+def simulate(prices, streak):
+    sim = list(prices)
+    for day in range(1, 11):
+        next_p = sim[-1] * 1.099
+        sim.append(next_p)
+        if calc_risk(sim): streak += 1
+        else: streak = 0
+        if streak >= 3: return day, next_p
+    return None, None
 
 # ==========================================
 # 📊 UI 渲染開始
@@ -174,14 +384,15 @@ is_twse = (info['market'] == 'twse' or info['market'] == '上市')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("🚀 正在向證交所/櫃買中心官方伺服器請求即時公告..."):
+with st.spinner("🚀 啟動雙保險架構：本機推演引擎 x 官方 OpenAPI 即時串接..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
+    df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
     df_margin = api_request("TaiwanStockMarginPurchaseShortSale", sid, safe_start_str)
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
     
-    # 呼叫官方 API
+    # 呼叫官方 API (已修復上櫃欄位問題)
     official_notice, official_disp = fetch_official_status(sid, is_twse)
     
     total_sheets = get_outstanding_shares(sid)
@@ -233,6 +444,9 @@ else:
     p_now, today_vol, price_date_str, price_date_str_full = 0, 0, "", ""
     c_class, arrow_sub_class = "", ""
 
+# 本地歷史推演引擎啟動
+df_notice_local = calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
+
 # ==========================================
 # 🚀 頂部標籤與橫幅渲染
 # ==========================================
@@ -276,7 +490,7 @@ with top_col2:
 
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
-# 🔥 動態公告橫幅 (100% 來自官方 API)
+# 🔥 動態公告橫幅 (100% 來自官方 OpenAPI 即時資料)
 if official_notice:
     latest_detail = official_notice[0].get("Detail", "")
     banner_html = f"""
@@ -305,7 +519,6 @@ if not df_price.empty:
         st.markdown(p_html, unsafe_allow_html=True)
         
     with c2:
-        # 右側看板改為「官方狀態公告」，不再做本地模擬預測
         if official_disp or is_punished_finmind:
             disp_desc = disp_info["match"] if is_punished_finmind else "官方處置中"
             disp_period = disp_info["period"] if is_punished_finmind else "詳見下方官方公告"
@@ -431,36 +644,40 @@ if not df_price.empty:
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
     # ==========================================
-    # 📜 官方資訊驗證區
+    # 📜 對稱雙塔：本機引擎歷史推演 vs 官方即時資訊
     # ==========================================
     st.markdown("---")
-    st.markdown("### 🏛️ 官方公告資訊看板")
+    st.markdown("### 🏛️ 雙保險驗證區：本機引擎歷史推演 vs 官方即時公告")
     h_col1, h_col2 = st.columns(2, gap="medium")
     
     with h_col1:
-        with st.expander("🔔 今日證交所 / 櫃買中心即時注意公告", expanded=True):
-            if official_notice:
-                st.markdown('<div class="openapi-badge">官方 OpenAPI 即時連線</div>', unsafe_allow_html=True)
-                # 轉成 DataFrame 並統一欄位名稱
-                df_n = pd.DataFrame(official_notice)
-                if 'SecCode' in df_n.columns: df_n = df_n.rename(columns={'SecCode': 'Code', 'SecName': 'Name'})
-                st.dataframe(df_n[['Code', 'Name', 'Detail']], hide_index=True, use_container_width=True)
-            else:
-                st.write("✅ 今日無任何官方注意公告。")
+        notice_count = len(df_notice_local) if not df_notice_local.empty else 0
+        with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次) - 彌補官方無歷史資料", expanded=True):
+            if not df_notice_local.empty:
+                st.dataframe(df_notice_local, hide_index=True, use_container_width=True)
+            else: 
+                st.write("近 30 交易日內未觸發系統嚴格注意標準")
                 
     with h_col2:
+        with st.expander("🔔 今日官方即時注意與處置公告 (OpenAPI)", expanded=True):
+            if official_notice or official_disp:
+                st.markdown('<div class="openapi-badge">官方 OpenAPI 即時連線</div>', unsafe_allow_html=True)
+                if official_notice:
+                    st.write("**即時生效：注意股公告**")
+                    df_n = pd.DataFrame(official_notice)
+                    st.dataframe(df_n[['Code', 'Name', 'Detail']], hide_index=True, use_container_width=True)
+                if official_disp:
+                    st.write("**即時生效：處置股公告**")
+                    df_d = pd.DataFrame(official_disp)
+                    display_cols = ['Code', 'Name', 'Period', 'Detail'] if 'Period' in df_d.columns else ['Code', 'Name', 'Detail']
+                    st.dataframe(df_d[display_cols], hide_index=True, use_container_width=True)
+            else:
+                st.write("✅ 今日無任何官方注意或處置公告。")
+                
         start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
         h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
         
-        with st.expander(f"🛑 歷史處置股紀錄 (FinMind 資料庫, 共 {len(h_df) if not h_df.empty else 0} 次)", expanded=True):
-            if official_disp:
-                st.markdown('<div class="openapi-badge">官方 OpenAPI 即時連線 (處置中)</div>', unsafe_allow_html=True)
-                df_d = pd.DataFrame(official_disp)
-                if 'SecCode' in df_d.columns: df_d = df_d.rename(columns={'SecCode': 'Code', 'SecName': 'Name'})
-                display_cols = ['Code', 'Name', 'Period', 'Detail'] if 'Period' in df_d.columns else ['Code', 'Name', 'Detail']
-                st.dataframe(df_d[display_cols], hide_index=True, use_container_width=True)
-                st.markdown("---")
-                
+        with st.expander(f"🛑 歷史處置股紀錄 (FinMind 資料庫, 共 {len(h_df) if not h_df.empty else 0} 次)", expanded=False):
             if not h_df.empty:
                 h_df['盤別'] = h_df['measure'].apply(extract_match_type)
                 h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
