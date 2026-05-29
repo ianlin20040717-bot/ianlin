@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 # ==========================================
 FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8"
 
-st.set_page_config(page_title="台股處置預警雷達 (官方即時 x 本機歷史推演)", layout="wide")
+st.set_page_config(page_title="台股處置預警雷達 (FinMind x 證交所雙擎版)", layout="wide")
 
 # ==========================================
 # 🎨 專業版自訂 CSS
@@ -67,53 +67,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 官方 OpenAPI 即時串接 (修復上櫃 Reason 欄位)
-# ==========================================
-@st.cache_data(ttl=600)
-def fetch_official_status(sid, is_twse):
-    notice_data, disp_data = [], []
-    sid_str = str(sid).strip()
-    
-    try:
-        if is_twse:
-            res_n = requests.get("https://openapi.twse.com.tw/v1/announcement/notice", timeout=5).json()
-            for item in res_n:
-                if str(item.get("Code", "")).strip() == sid_str: 
-                    notice_data.append(item)
-            
-            res_d = requests.get("https://openapi.twse.com.tw/v1/announcement/disposition", timeout=5).json()
-            for item in res_d:
-                if str(item.get("Code", "")).strip() == sid_str: 
-                    disp_data.append(item)
-        else:
-            # 統一 TPEx (上櫃) 的爛位名稱與 TWSE 一致，確保後續 UI 可以正常讀取 Detail
-            res_n = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_notice_securities", timeout=5).json()
-            for item in res_n:
-                if str(item.get("SecCode", "")).strip() == sid_str or str(item.get("Code", "")).strip() == sid_str: 
-                    notice_data.append({
-                        "Date": item.get("SecDate", ""),
-                        "Code": item.get("SecCode", ""),
-                        "Name": item.get("SecName", ""),
-                        "Detail": item.get("Reason", "") # 🔥 上櫃叫做 Reason，轉為 Detail
-                    })
-                    
-            res_d = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposition_securities", timeout=5).json()
-            for item in res_d:
-                if str(item.get("SecCode", "")).strip() == sid_str or str(item.get("Code", "")).strip() == sid_str: 
-                    disp_data.append({
-                        "Date": item.get("SecDate", ""),
-                        "Code": item.get("SecCode", ""),
-                        "Name": item.get("SecName", ""),
-                        "Period": item.get("Period", ""),
-                        "Detail": item.get("Reason", "") # 🔥 上櫃叫做 Reason，轉為 Detail
-                    })
-    except: 
-        pass
-        
-    return notice_data, disp_data
-
-# ==========================================
-# 📡 FinMind 資料抓取模組
+# 📡 資料抓取模組 (FinMind + 證交所 OpenAPI)
 # ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -129,6 +83,23 @@ def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     except: 
         pass
     return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def fetch_twse_openapi(sid):
+    notice_data, disp_data = [], []
+    try:
+        res_n = requests.get("https://openapi.twse.com.tw/v1/announcement/notice", timeout=5).json()
+        for item in res_n:
+            if str(item.get("Code", "")).strip() == str(sid):
+                notice_data.append(item)
+    except: pass
+    try:
+        res_d = requests.get("https://openapi.twse.com.tw/v1/announcement/disposition", timeout=5).json()
+        for item in res_d:
+            if str(item.get("Code", "")).strip() == str(sid):
+                disp_data.append(item)
+    except: pass
+    return pd.DataFrame(notice_data), pd.DataFrame(disp_data)
 
 @st.cache_data(ttl=86400)
 def get_all_info():
@@ -153,7 +124,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (大盤濾網全覆蓋修正版 - 用於彌補官方無歷史資料)
+# 🧠 核心：本地端法規判定引擎 (>=32% 無視大盤豁免條款版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -178,6 +149,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
+    # 官方防呆冷卻陣列
     last_trigger = {
         "rule1": -999, "rule3": -999, "rule4": -999, 
         "rule10": -999, "rule11": -999, "rule13": -999
@@ -214,31 +186,36 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            is_base_price_abnormal = abs(ret_6d_raw) >= 25 and diff_index >= 20
+            # 🔥 定義最底層的天條濾網：漲幅25%且偏離大盤20% 【或純漲幅高達32%以上無視大盤！】
+            is_base_price_abnormal = (abs(ret_6d_raw) >= 25 and diff_index >= 20) or abs(ret_6d_raw) >= 32
 
+            # --- 第一款：上市與上櫃獨立判定 ---
             if is_twse:
-                cond1_A = abs(ret_6d_raw) >= 32 and diff_index >= 20
+                cond1_A = is_base_price_abnormal
                 cond1_B = abs(ret_6d_raw) >= 30 and abs(diff_5d) >= 20
                 if cond1_A or cond1_B:
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                        if cond1_B and not cond1_A:
-                            reasons.append(f"最近六個營業日累積收盤價{word}達{abs(ret_6d_raw):.2f}%。且六個營業日起迄兩個營業日收盤價價差達{abs(diff_5d):.2f}元﹝第一款﹞")
+                        # 只要滿足價差條件，強制加上價差描述字眼 (符合 2454 聯發科)
+                        if cond1_B:
+                            reasons.append(f"最近六個營業日累積收盤價{word}達{abs(ret_6d_raw):.2f}%。且六個營業日起迄兩個營業日收盤價價差達{abs(diff_5d):.2f}元﹝第一款﹞。")
                         else:
-                            reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
+                            # 純觸發 32% (符合 3042 晶技)
+                            reasons.append(f"最近六個營業日累積收盤價{word}達{abs(ret_6d_raw):.2f}%﹝第一款﹞。")
                         last_trigger["rule1"] = i
             else:
-                cond1_A = abs(ret_6d_raw) >= 32 and diff_index >= 20
-                cond1_B = is_base_price_abnormal and abs(diff_5d) >= 50
+                cond1_A = is_base_price_abnormal
+                cond1_B = abs(ret_6d_raw) >= 25 and abs(diff_5d) >= 50
                 if cond1_A or cond1_B:
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
-                        if cond1_B and not cond1_A:
+                        if cond1_B:
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}%且最近六個營業日(含當日)起迄兩個營業日之最後成交價價差達新臺幣{abs(diff_5d):.1f}元(第一款)")
                         else:
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
 
+            # --- 第三款與第四款無縫聯播 ---
             rule3_hit = False
             rule4_hit = False
             vol_ratio = 0
@@ -247,6 +224,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
                 daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
                 vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
+                
                 if is_base_price_abnormal and vol_ratio >= vol_multiple and daily_turnover >= 10:
                     rule3_hit = True
 
@@ -270,17 +248,21 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             if out_str:
                 reasons.append(" ".join(out_str))
 
+            # --- 第十款：累積週轉率異常 ---
             if turnover_6d >= 80 and daily_turnover >= 20: 
                 if (i - last_trigger["rule10"]) >= 6:
                     reasons.append(f"最近六個營業日(含當日)之累積週轉率為{turnover_6d:.2f}%，當日週轉率達{daily_turnover:.2f}%(第十款)")
                     last_trigger["rule10"] = i
 
+        # --- 第十一款：絕對價差異常 ---
         if i >= 5:
             p_close_5 = df_price['close'].iloc[i-5]
             diff_5d_11 = c_close - p_close_5
             abs_diff_11 = abs(diff_5d_11)
+            
             tier_11 = int(c_close // 500)
             threshold_11 = 100 + tier_11 * 25
+            
             if abs_diff_11 >= threshold_11:
                 six_day_prices = df_price['close'].iloc[i-5:i+1]
                 if diff_5d_11 > 0 and c_close == six_day_prices.max():
@@ -292,6 +274,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                         reasons.append(f"六個營業日起迄兩個營業日收盤價價差達{abs_diff_11:.2f}元且當日收盤價為最近六個營業日收盤價最低者 ﹝第十一款﹞")
                         last_trigger["rule11"] = i
 
+        # --- 第十三款：當沖異常 ---
         total_vol_6d = df_price['Trading_Volume'].iloc[i-5:i+1].sum()
         dt_vol_6d = sum(day_dict.get(df_price.index[j].strftime('%Y-%m-%d'), {}).get('vol', 0) for j in range(i-5, i+1))
         dt_pct_6d = (dt_vol_6d / total_vol_6d * 100) if total_vol_6d > 0 else 0
@@ -392,28 +375,26 @@ with st.spinner("🚀 啟動雙保險架構：本機推演引擎 x 官方 OpenAP
     df_day = api_request("TaiwanStockDayTrading", sid, start_str)
     df_disp = api_request("TaiwanStockDispositionSecuritiesPeriod", start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"))
     
-    # 呼叫官方 API (已修復上櫃欄位問題)
-    official_notice, official_disp = fetch_official_status(sid, is_twse)
-    
     total_sheets = get_outstanding_shares(sid)
     if total_sheets == 0 and not df_margin.empty and 'MarginPurchaseLimit' in df_margin.columns:
         limit = df_margin['MarginPurchaseLimit'].max()
         if pd.notna(limit) and limit > 0:
             total_sheets = int((limit * 4) / 1000 if limit >= 1000000 else (limit * 4))
 
-is_punished_finmind = False
+is_punished = False
 disp_info = {}
 if not df_disp.empty and 'period_end' in df_disp.columns:
     df_disp['stock_id'] = df_disp['stock_id'].astype(str).str.strip() 
     df_disp['period_end_dt'] = pd.to_datetime(df_disp['period_end'])
     active_disp = df_disp[(df_disp['stock_id'] == sid) & (df_disp['period_end_dt'] >= pd.Timestamp.today().normalize())]
     if not active_disp.empty:
-        is_punished_finmind = True
+        is_punished = True
         latest = active_disp.sort_values('period_end_dt').iloc[-1]
+        measure = latest['measure']
         disp_info = {
             "period": f"{latest['period_start']} ~ {latest['period_end']}", 
-            "measure": latest['measure'], 
-            "match": extract_match_type(latest['measure']) 
+            "measure": measure, 
+            "match": extract_match_type(measure) 
         }
 
 if not df_price.empty:
@@ -444,7 +425,6 @@ else:
     p_now, today_vol, price_date_str, price_date_str_full = 0, 0, "", ""
     c_class, arrow_sub_class = "", ""
 
-# 本地歷史推演引擎啟動
 df_notice_local = calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
 
 # ==========================================
@@ -468,7 +448,7 @@ is_day_trade_eligible = can_margin or can_short or history_can_day
 
 tag_margin = "t-on" if can_margin else "t-off"
 tag_short = "t-on" if can_short else "t-off"
-tag_day = "t-on" if is_day_trade_eligible and not is_punished_finmind else "t-off" 
+tag_day = "t-on" if is_day_trade_eligible and not is_punished else "t-off" 
 
 large_caps = ['2330', '2454', '2317', '2603', '3231', '3481', '2382', '2881', '2891', '2609', '2615', '3008', '2303', '1101']
 tag_future = "t-on" if sid in large_caps or today_vol > 10000000 else "t-off"
@@ -478,8 +458,9 @@ with top_col2:
     tags_html = '<div class="tags-container">'
     tags_html += f'<span class="tag-base t-market">{market_name}</span>'
     tags_html += f'<span class="tag-base t-market">{info["industry"]}</span>'
-    if is_punished_finmind or official_disp: 
+    if is_punished: 
         tags_html += f'<span class="tag-base t-warn">處置中</span>'
+        tags_html += f'<span class="tag-base t-warn">{disp_info["match"]}</span>'
     tags_html += f'<span class="tag-base {tag_margin}">資</span>'
     tags_html += f'<span class="tag-base {tag_short}">券</span>'
     tags_html += f'<span class="tag-base {tag_day}">沖</span>'
@@ -490,21 +471,38 @@ with top_col2:
 
 st.markdown(f'<div class="title-text">{search} 盤後籌碼與風險分析</div>', unsafe_allow_html=True)
 
-# 🔥 動態公告橫幅 (100% 來自官方 OpenAPI 即時資料)
-if official_notice:
-    latest_detail = official_notice[0].get("Detail", "")
-    banner_html = f"""
-    <div class="notice-banner">
-        <div class="notice-banner-header">
-            <div class="notice-banner-title">⚠️ 官方注意交易資訊公告</div>
-            <div class="notice-banner-date">{price_date_str_full.replace('-', '/')}</div>
+if not df_notice_local.empty and price_date_str_full != "":
+    latest_notice_row = df_notice_local.iloc[0]
+    if latest_notice_row['年月日'] == price_date_str_full:
+        banner_html = f"""
+        <div class="notice-banner">
+            <div class="notice-banner-header">
+                <div class="notice-banner-title">⚠️ 注意交易資訊公告</div>
+                <div class="notice-banner-date">{latest_notice_row['年月日'].replace('-', '/')}</div>
+            </div>
+            <div class="notice-banner-content">
+                {latest_notice_row['觸發條款'].replace(' \n', '<br>')}
+            </div>
         </div>
-        <div class="notice-banner-content">
-            {latest_detail.replace(' ', '<br>')}
-        </div>
-    </div>
-    """
-    st.markdown(banner_html, unsafe_allow_html=True)
+        """
+        st.markdown(banner_html, unsafe_allow_html=True)
+
+# ------------------------------
+# 🚀 異常爆量警戒倒推模型
+# ------------------------------
+turnover_warn_str = ""
+if not df_price.empty and len(closes) >= 60:
+    avg_vol_60d_lots = vols.tail(60).mean() / 1000
+    warn_volume = avg_vol_60d_lots * (5 if is_twse else 6)
+    if warn_volume > 0:
+        turnover_warn_str = f"約 {warn_volume:,.0f} 張"
+    else:
+        turnover_warn_str = "均量過低無法估算"
+else:
+    turnover_warn_str = "無法估算 (資料未滿60日)"
+
+if total_sheets == 0:
+    st.warning("⚠️ 無法從資料庫精確取得股本資料，週轉率相關天條可能無法正常觸發！")
 
 if not df_price.empty:
     c1, c2 = st.columns([1, 1], gap="medium")
@@ -519,41 +517,53 @@ if not df_price.empty:
         st.markdown(p_html, unsafe_allow_html=True)
         
     with c2:
-        if official_disp or is_punished_finmind:
-            disp_desc = disp_info["match"] if is_punished_finmind else "官方處置中"
-            disp_period = disp_info["period"] if is_punished_finmind else "詳見下方官方公告"
+        if is_punished:
             html_content = (
                 '<div class="top-card">'
-                '<div class="metric-label">官方狀態指示</div>'
-                f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中 ({disp_desc})</div>'
-                f'<div class="metric-sub">處置期間：{disp_period}</div>'
+                '<div class="metric-label">風險預測</div>'
+                f'<div class="metric-value" style="color:#ffc107;">🚨 已在處置中 ({disp_info["match"]})</div>'
+                f'<div class="metric-sub">處置期間：{disp_info["period"]}</div>'
+                f'<div class="metric-sub" style="color:#888; margin-top:8px;">(處置期間無須計算量能紅線)</div>'
                 '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
                 '<div style="width:100%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
                 '</div></div>'
             )
             st.markdown(html_content, unsafe_allow_html=True)
-        elif official_notice:
-            html_content = (
-                '<div class="top-card">'
-                '<div class="metric-label">官方狀態指示</div>'
-                f'<div class="metric-value" style="color:#ffc107;">⚠️ 本日為注意股</div>'
-                f'<div class="metric-sub">因價量異常觸發官方注意機制，請留意流動性風險</div>'
-                '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
-                f'<div style="width:60%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
-                '</div></div>'
-            )
-            st.markdown(html_content, unsafe_allow_html=True)
         else:
-            html_content = (
-                '<div class="top-card">'
-                '<div class="metric-label">官方狀態指示</div>'
-                '<div class="metric-value" style="color:#00ff00;">✅ 正常交易狀態</div>'
-                f'<div class="metric-sub">今日無任何處置或注意通報，籌碼流動性正常</div>'
-                '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
-                '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
-                '</div></div>'
-            )
-            st.markdown(html_content, unsafe_allow_html=True)
+            streak = 0
+            tmp = list(closes)
+            for _ in range(5):
+                if calc_risk(tmp): streak += 1; tmp.pop()
+                else: break
+            
+            d, p = simulate(list(closes), streak)
+            p_warn = closes.iloc[-6] * 1.25 if len(closes) >= 7 else 0
+            
+            if d:
+                risk_width = max(0, min(100, 100 - (d * 10)))
+                html_content = (
+                    '<div class="top-card">'
+                    '<div class="metric-label">風險預測</div>'
+                    f'<div class="metric-value" style="color:#ffc107;">🔥 最快 {d} 天內進入處置 (或再次處置)</div>'
+                    f'<div class="metric-sub">明日絕對注意價：{p_warn:.2f} ｜ 處置預估觸發價：{p:.2f}</div>'
+                    f'<div class="metric-sub" style="color:#ff4b4b; margin-top:8px;">🚨 異常爆量警戒(60日均量{5 if is_twse else 6}倍)：{turnover_warn_str}</div>'
+                    '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
+                    f'<div style="width:{risk_width}%; background-color:#ffc107; height:6px; border-radius:5px;"></div>'
+                    '</div></div>'
+                )
+                st.markdown(html_content, unsafe_allow_html=True)
+            else:
+                html_content = (
+                    '<div class="top-card">'
+                    '<div class="metric-label">風險預測</div>'
+                    '<div class="metric-value" style="color:#00ff00;">✅ 短期內無處置風險</div>'
+                    f'<div class="metric-sub">明日絕對注意價：{p_warn:.2f} ｜ 連拉10根漲停亦安全</div>'
+                    f'<div class="metric-sub" style="color:#f5c518; margin-top:8px;">📊 異常爆量警戒(60日均量{5 if is_twse else 6}倍)：{turnover_warn_str}</div>'
+                    '<div style="width:100%; background-color:#333; border-radius:5px; margin-top:12px;">'
+                    '<div style="width:0%; background-color:#00ff00; height:6px; border-radius:5px;"></div>'
+                    '</div></div>'
+                )
+                st.markdown(html_content, unsafe_allow_html=True)
 
     def m_card(c, l, v, clr="white", sub=""):
         card_html = (
@@ -644,40 +654,37 @@ if not df_price.empty:
     m_card(col_r3[3], "自營商買賣金額", d_str, clr=d_clr, sub=inst_date_sub)
 
     # ==========================================
-    # 📜 對稱雙塔：本機引擎歷史推演 vs 官方即時資訊
+    # 📜 對稱雙塔：本機引擎自算 vs 官方處置
     # ==========================================
     st.markdown("---")
-    st.markdown("### 🏛️ 雙保險驗證區：本機引擎歷史推演 vs 官方即時公告")
+    st.markdown("### 🏛️ 雙保險驗證：本機引擎 vs 官方資料庫")
     h_col1, h_col2 = st.columns(2, gap="medium")
     
     with h_col1:
         notice_count = len(df_notice_local) if not df_notice_local.empty else 0
-        with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次) - 彌補官方無歷史資料", expanded=True):
+        with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)", expanded=True):
             if not df_notice_local.empty:
                 st.dataframe(df_notice_local, hide_index=True, use_container_width=True)
             else: 
                 st.write("近 30 交易日內未觸發系統嚴格注意標準")
                 
     with h_col2:
-        with st.expander("🔔 今日官方即時注意與處置公告 (OpenAPI)", expanded=True):
-            if official_notice or official_disp:
-                st.markdown('<div class="openapi-badge">官方 OpenAPI 即時連線</div>', unsafe_allow_html=True)
-                if official_notice:
+        if is_twse:
+            twse_notice, twse_disp = fetch_twse_openapi(sid)
+            if not twse_notice.empty or not twse_disp.empty:
+                st.markdown('<div class="openapi-badge">證交所 OpenAPI 即時連線</div>', unsafe_allow_html=True)
+                if not twse_notice.empty:
                     st.write("**即時生效：注意股公告**")
-                    df_n = pd.DataFrame(official_notice)
-                    st.dataframe(df_n[['Code', 'Name', 'Detail']], hide_index=True, use_container_width=True)
-                if official_disp:
+                    st.dataframe(twse_notice[['Date', 'Name', 'Detail']], hide_index=True, use_container_width=True)
+                if not twse_disp.empty:
                     st.write("**即時生效：處置股公告**")
-                    df_d = pd.DataFrame(official_disp)
-                    display_cols = ['Code', 'Name', 'Period', 'Detail'] if 'Period' in df_d.columns else ['Code', 'Name', 'Detail']
-                    st.dataframe(df_d[display_cols], hide_index=True, use_container_width=True)
-            else:
-                st.write("✅ 今日無任何官方注意或處置公告。")
+                    st.dataframe(twse_disp[['Date', 'Name', 'Period', 'Detail']], hide_index=True, use_container_width=True)
+                st.markdown("---")
                 
         start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
         h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
         
-        with st.expander(f"🛑 歷史處置股紀錄 (FinMind 資料庫, 共 {len(h_df) if not h_df.empty else 0} 次)", expanded=False):
+        with st.expander(f"🛑 歷史處置股紀錄 (FinMind 資料庫, 共 {len(h_df) if not h_df.empty else 0} 次)", expanded=True):
             if not h_df.empty:
                 h_df['盤別'] = h_df['measure'].apply(extract_match_type)
                 h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
