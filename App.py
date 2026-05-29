@@ -8,10 +8,10 @@ from datetime import datetime, timedelta
 # ==========================================
 FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIiwiZW1haWwiOiJpYW5saW4yMDA0MDcxN0BnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.G5jm2LKIg3BaZUIt7SIpqS1V1eZwzZg4ojuK2Naq2-8"
 
-st.set_page_config(page_title="台股處置預警雷達 (FinMind 旗艦版)", layout="wide")
+st.set_page_config(page_title="台股處置預警雷達 (FinMind x 證交所雙擎版)", layout="wide")
 
 # ==========================================
-# 🎨 專業版自訂 CSS
+# 🎨 專業版自訂 CSS (結合漲跌停底色與橫幅)
 # ==========================================
 st.markdown("""
 <style>
@@ -61,11 +61,13 @@ st.markdown("""
     .red-text { color: #ff4b4b !important; }
     .green-text { color: #00ff00 !important; }
     .title-text { font-size: 32px; font-weight: 800; color: #fff; margin-bottom: 25px; }
+    
+    .openapi-badge { background-color: #0056b3; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; margin-bottom: 8px; display: inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 資料抓取模組
+# 📡 資料抓取模組 (FinMind + 證交所 OpenAPI 雙引擎)
 # ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -81,6 +83,29 @@ def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     except: 
         pass
     return pd.DataFrame()
+
+@st.cache_data(ttl=600) # OpenAPI 即時性高，快取設定縮短為10分鐘
+def fetch_twse_openapi(sid):
+    """🏛️ 串接證券交易所官方 OpenAPI，取得最即時公告"""
+    notice_data = []
+    disp_data = []
+    try:
+        # 1. 抓取注意股公告
+        res_n = requests.get("https://openapi.twse.com.tw/v1/announcement/notice", timeout=5).json()
+        for item in res_n:
+            if str(item.get("Code", "")).strip() == str(sid):
+                notice_data.append(item)
+    except: pass
+    
+    try:
+        # 2. 抓取處置股公告
+        res_d = requests.get("https://openapi.twse.com.tw/v1/announcement/disposition", timeout=5).json()
+        for item in res_d:
+            if str(item.get("Code", "")).strip() == str(sid):
+                disp_data.append(item)
+    except: pass
+    
+    return pd.DataFrame(notice_data), pd.DataFrame(disp_data)
 
 @st.cache_data(ttl=86400)
 def get_all_info():
@@ -105,7 +130,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (破解全天條真神版)
+# 🧠 核心：本地端法規判定引擎 (完美上市櫃獨立參數覆蓋版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -130,14 +155,10 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
-    # 官方冷卻陣列
+    # 官方防呆冷卻系統
     last_trigger = {
-        "rule1": -999,
-        "rule3": -999,
-        "rule4": -999,
-        "rule10": -999,
-        "rule11": -999,
-        "rule13": -999
+        "rule1": -999, "rule3": -999, "rule4": -999, 
+        "rule10": -999, "rule11": -999, "rule13": -999
     }
 
     # 上市與上櫃的基準切換
@@ -158,7 +179,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             ret_6d_raw = (c_close / p_close_6 - 1) * 100 if p_close_6 > 0 else 0
             diff_5d = c_close - p_close_5
             
-            # 計算大盤偏離率
             dt_str_p6 = df_price.index[i-6].strftime('%Y-%m-%d')
             taiex_c = taiex_dict.get(dt_str_curr, 0)
             taiex_p6 = taiex_dict.get(dt_str_p6, 0)
@@ -173,10 +193,9 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # --- 🔥 第一款：上市與上櫃雙軌雙條件判定 (大盤偏離 OR 絕對價差) ---
+            # --- 🔥 第一款：雙軌雙條件判定 ---
             is_price_abnormal = False
             if is_twse:
-                # 上市：1. 漲幅 >= 25% 且偏離大盤 >= 20%  OR  2. 漲幅 >= 30% 且價差 >= 20元
                 cond1_A = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
                 cond1_B = abs(ret_6d_raw) >= 30 and abs(diff_5d) >= 20
                 if cond1_B or cond1_A:
@@ -189,7 +208,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
             else:
-                # 上櫃：1. 漲幅 >= 25% 且偏離大盤 >= 20%  OR  2. 漲幅 >= 25% 且價差 >= 50元
                 cond1_A = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
                 cond1_B = abs(ret_6d_raw) >= 25 and abs(diff_5d) >= 50
                 if cond1_B or cond1_A:
@@ -211,7 +229,6 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
                 daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
                 vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
-                
                 if is_price_abnormal and vol_ratio >= vol_multiple:
                     rule3_hit = True
 
@@ -352,7 +369,7 @@ is_twse = (info['market'] == 'twse' or info['market'] == '上市')
 start_str = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
 safe_start_str = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d") 
 
-with st.spinner("正在啟動全天條覆蓋之極致推演引擎..."):
+with st.spinner("🚀 啟動雙保險架構：本機推演引擎 x 官方 OpenAPI 即時串接..."):
     df_price = api_request("TaiwanStockPrice", sid, start_str)
     df_taiex = api_request("TaiwanStockPrice", "TAIEX", start_str)
     df_inst = api_request("TaiwanStockInstitutionalInvestorsBuySell", sid, safe_start_str)
@@ -642,20 +659,35 @@ if not df_price.empty:
     # 📜 對稱雙塔：本機引擎自算 vs 官方處置
     # ==========================================
     st.markdown("---")
+    st.markdown("### 🏛️ 雙保險驗證：本機引擎 vs 官方資料庫")
     h_col1, h_col2 = st.columns(2, gap="medium")
     
     with h_col1:
         notice_count = len(df_notice_local) if not df_notice_local.empty else 0
-        with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)"):
+        with st.expander(f"📜 系統推演【注意股】歷史紀錄 (共 {notice_count} 次)", expanded=True):
             if not df_notice_local.empty:
                 st.dataframe(df_notice_local, hide_index=True, use_container_width=True)
             else: 
                 st.write("近 30 交易日內未觸發系統嚴格注意標準")
                 
     with h_col2:
+        # TWSE OpenAPI 即時驗證 (僅限上市股)
+        if is_twse:
+            twse_notice, twse_disp = fetch_twse_openapi(sid)
+            if not twse_notice.empty or not twse_disp.empty:
+                st.markdown('<div class="openapi-badge">證交所 OpenAPI 即時連線</div>', unsafe_allow_html=True)
+                if not twse_notice.empty:
+                    st.write("**即時生效：注意股公告**")
+                    st.dataframe(twse_notice[['Date', 'Name', 'Detail']], hide_index=True, use_container_width=True)
+                if not twse_disp.empty:
+                    st.write("**即時生效：處置股公告**")
+                    st.dataframe(twse_disp[['Date', 'Name', 'Period', 'Detail']], hide_index=True, use_container_width=True)
+                st.markdown("---")
+                
         start_60d = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
         h_df = api_request("TaiwanStockDispositionSecuritiesPeriod", sid, start_60d)
-        with st.expander(f"🛑 近 30 交易日官方【處置股】紀錄 (共 {len(h_df) if not h_df.empty else 0} 次)"):
+        
+        with st.expander(f"🛑 歷史處置股紀錄 (FinMind 資料庫, 共 {len(h_df) if not h_df.empty else 0} 次)", expanded=True):
             if not h_df.empty:
                 h_df['盤別'] = h_df['measure'].apply(extract_match_type)
                 h_df = h_df[['period_start', 'period_end', '盤別', 'measure']]
