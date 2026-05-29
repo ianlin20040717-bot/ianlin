@@ -11,7 +11,7 @@ FINMIND_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiaWFubGluIi
 st.set_page_config(page_title="台股處置預警雷達 (FinMind x 證交所雙擎版)", layout="wide")
 
 # ==========================================
-# 🎨 專業版自訂 CSS (結合漲跌停底色與橫幅)
+# 🎨 專業版自訂 CSS
 # ==========================================
 st.markdown("""
 <style>
@@ -67,7 +67,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 📡 資料抓取模組 (FinMind + 證交所 OpenAPI 雙引擎)
+# 📡 資料抓取模組 (FinMind + 證交所 OpenAPI)
 # ==========================================
 def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -84,27 +84,21 @@ def api_request(dataset, data_id=None, start=None, token=FINMIND_TOKEN):
         pass
     return pd.DataFrame()
 
-@st.cache_data(ttl=600) # OpenAPI 即時性高，快取設定縮短為10分鐘
+@st.cache_data(ttl=600)
 def fetch_twse_openapi(sid):
-    """🏛️ 串接證券交易所官方 OpenAPI，取得最即時公告"""
-    notice_data = []
-    disp_data = []
+    notice_data, disp_data = [], []
     try:
-        # 1. 抓取注意股公告
         res_n = requests.get("https://openapi.twse.com.tw/v1/announcement/notice", timeout=5).json()
         for item in res_n:
             if str(item.get("Code", "")).strip() == str(sid):
                 notice_data.append(item)
     except: pass
-    
     try:
-        # 2. 抓取處置股公告
         res_d = requests.get("https://openapi.twse.com.tw/v1/announcement/disposition", timeout=5).json()
         for item in res_d:
             if str(item.get("Code", "")).strip() == str(sid):
                 disp_data.append(item)
     except: pass
-    
     return pd.DataFrame(notice_data), pd.DataFrame(disp_data)
 
 @st.cache_data(ttl=86400)
@@ -130,7 +124,7 @@ def get_outstanding_shares(sid):
     return 0
 
 # ==========================================
-# 🧠 核心：本地端法規判定引擎 (完美上市櫃獨立參數覆蓋版)
+# 🧠 核心：本地端法規判定引擎 (完全修正版)
 # ==========================================
 def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse):
     records = []
@@ -155,13 +149,11 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
             dt_str = r['date'].strftime('%Y-%m-%d')
             taiex_dict[dt_str] = r['close']
 
-    # 官方防呆冷卻系統
     last_trigger = {
         "rule1": -999, "rule3": -999, "rule4": -999, 
         "rule10": -999, "rule11": -999, "rule13": -999
     }
 
-    # 上市與上櫃的基準切換
     turnover_threshold = 10 if is_twse else 15
     vol_multiple = 5 if is_twse else 6
 
@@ -193,13 +185,15 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 turnover_6d = 0
                 daily_turnover = 0
 
-            # --- 🔥 第一款：雙軌雙條件判定 ---
-            is_price_abnormal = False
+            # 通用的漲幅 25% 基礎門檻
+            is_ret_25 = abs(ret_6d_raw) >= 25
+
+            # --- 第一款：上市與上櫃嚴格脫鉤判定 ---
             if is_twse:
-                cond1_A = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
+                # 上市：大盤偏離 >= 20% 或 價差 >= 20元
+                cond1_A = is_ret_25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
                 cond1_B = abs(ret_6d_raw) >= 30 and abs(diff_5d) >= 20
                 if cond1_B or cond1_A:
-                    is_price_abnormal = True
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                         if cond1_B:
@@ -208,10 +202,10 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
             else:
-                cond1_A = abs(ret_6d_raw) >= 25 and abs(ret_6d_raw - taiex_ret_6d) >= 20
-                cond1_B = abs(ret_6d_raw) >= 25 and abs(diff_5d) >= 50
+                # 上櫃：漲幅 >= 32% 或 價差 >= 50元
+                cond1_A = abs(ret_6d_raw) >= 32
+                cond1_B = is_ret_25 and abs(diff_5d) >= 50
                 if cond1_B or cond1_A:
-                    is_price_abnormal = True
                     if (i - last_trigger["rule1"]) >= 6:
                         word = "漲幅" if ret_6d_raw > 0 else "跌幅"
                         if cond1_B:
@@ -220,7 +214,7 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                             reasons.append(f"最近六個營業日(含當日)累積之最後成交價{word}達{abs(ret_6d_raw):.2f}% (第一款)")
                         last_trigger["rule1"] = i
 
-            # --- 第三款與第四款聯播 ---
+            # --- 第三款與第四款聯播 (只需 25% 門檻) ---
             rule3_hit = False
             rule4_hit = False
             vol_ratio = 0
@@ -229,10 +223,10 @@ def calculate_local_attention(df_price, df_day, df_taiex, total_sheets, is_twse)
                 avg_vol_60d = df_price['Trading_Volume'].iloc[i-60:i].mean() / 1000
                 daily_vol = df_price['Trading_Volume'].iloc[i] / 1000
                 vol_ratio = (daily_vol / avg_vol_60d) if avg_vol_60d > 0 else 0
-                if is_price_abnormal and vol_ratio >= vol_multiple:
+                if is_ret_25 and vol_ratio >= vol_multiple:
                     rule3_hit = True
 
-            if is_price_abnormal and daily_turnover >= turnover_threshold:
+            if is_ret_25 and daily_turnover >= turnover_threshold:
                 rule4_hit = True
 
             word = "漲幅" if ret_6d_raw > 0 else "跌幅"
@@ -671,7 +665,6 @@ if not df_price.empty:
                 st.write("近 30 交易日內未觸發系統嚴格注意標準")
                 
     with h_col2:
-        # TWSE OpenAPI 即時驗證 (僅限上市股)
         if is_twse:
             twse_notice, twse_disp = fetch_twse_openapi(sid)
             if not twse_notice.empty or not twse_disp.empty:
